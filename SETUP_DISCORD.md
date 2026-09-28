@@ -118,4 +118,41 @@ python discord_bot.py
 | `SETUP_DISCORD.md` | คู่มือที่คุณกำลังอ่านอยู่ |
 | `n8n-jarvis-discord.json` | workflow n8n สำเร็จรูป (ทางเลือก B) |
 
+---
+
+# 🆕 อัปเดต v4 (28 ก.ย. 2026): เสียงผู้หญิง + มือเพิ่ม
+
+## 🎙️ เสียงผู้หญิงไทย (Edge TTS "อัจฉรา")
+```bash
+pkg clean -y >/dev/null 2>&1; pip install -U gTTS edge-tts
+# ทดสอบเสียง:
+edge-tts --voice th-TH-AcharaNeural --text "สวัสดีครับ" --write-media /sdcard/t.mp3 && termux-open /sdcard/t.mp3
+```
+บอทจะใช้ลำดับ: Achara (ธรรมชาติมาก) → gTTS → เสียงระบบ
+คุมเสียง: พิมพ์ `เปิดเสียง` / `ปิดเสียง` หรือใช้ `/voice`
+
+## 🦾 มือเพิ่มใหม่ (ต้องมีแอป Termux:API จากร้านเดียวกับ Termux + `pkg install termux-api`)
+| พิมพ์ว่า | ผล |
+|---|---|
+| `เปิดไฟฉาย` / `ปิดไฟฉาย` | 🔦 ควบคุมไฟฉายจริง |
+| `ถ่ายรูปให้หน่อย` / `ถ่ายรูปเซลฟี่` | 📸 ถ่ายจากกล้องหลัง/หน้า แล้วส่งรูปเข้าแชต |
+| `ฉันอยู่ที่ไหน` | 📍 พิกัด GPS + ลิงก์ Google Maps |
+
+คำสั่งใหม่: `/help` (เห็นทุกความสามารถ) `/torch` `/photo` `/weather`
+
+## 🧠 แก้ปัญหา "ไม่พบโมเดลที่ใช้ได้"
+Groq ปลดโมเดลเก่าบ่อย — บอทตอนนี้ไล่ทดลองโมเดลจริงทีละตัวแล้วจำตัวที่ใช้ได้
+ตัวที่ยืนยันใช้ได้: `openai/gpt-oss-20b` (ถ้าเจอ 404 อีก บอทจะเปลี่ยนเองอัตโนมัติ)
+
+## 📱 อัปเดตบอทเป็นเวอร์ชันล่าสุด (ทำซ้ำได้เสมอ)
+หยุดบอท (Volume Down + C) แล้ววาง:
+```bash
+cd ~/My_bot_kao && curl -sL "https://api.github.com/repos/kaoltx-beep/ai-assistant-status/contents/discord_bot.py?ref=arena/01a0e677-ai-assistant-status" | python -c "import sys,json,base64;open('discord_bot.py','wb').write(base64.b64decode(json.load(sys.stdin)['content']))" && python discord_bot.py
+```
+
+## 📱 อัปเดต Telegram bot (run.py) ให้กลับมามีชีวิต
+```bash
+cd ~/My_bot_kao && cp run.py run.py.bak_$(date +%m%d) && curl -sL "https://api.github.com/repos/kaoltx-beep/ai-assistant-status/contents/run.py?ref=arena/01a0e677-ai-assistant-status" | python -c "import sys,json,base64;open('run.py','wb').write(base64.b64decode(json.load(sys.stdin)['content']))" && python run.py
+```
+
 สร้างโดย Arena Agent • โค้ดออกแบบให้เข้ากับระบบ Jarvis เดิมของคุณ (ระบบล้างคำหลุด "ค่ะ→ครับ", ระบบจำบริบท, โมเดล llama-3.1-8b-instant)

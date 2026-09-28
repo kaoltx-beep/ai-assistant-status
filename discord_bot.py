@@ -238,6 +238,56 @@ def hand_random(text=""):
     return f"🎲 สุ่มได้เลข {random.randint(1, 100)} ครับ"
 
 
+def hand_torch(text=""):
+    t = (text or "").lower()
+    # "เปิดไฟฉาย" มี "ปิดไฟฉาย" ซ่อนอยู่ (เ-ปิดไฟฉาย) — ถ้ามี "เปิด" ถือว่าเปิดเสมอ
+    state = "off" if ("เปิด" not in t and "ปิด" in t) else "on"
+    try:
+        subprocess.run(["termux-torch", state], capture_output=True, timeout=15)
+        return "🔦 เปิดไฟฉายแล้วครับ" if state == "on" else "🌑 ปิดไฟฉายแล้วครับ"
+    except FileNotFoundError:
+        return "❌ ต้องติดตั้งแอป Termux:API + รัน pkg install termux-api ก่อนนะครับ"
+    except Exception as e:
+        return f"❌ ควบคุมไฟฉายไม่สำเร็จ: {e}"
+
+
+def hand_camera(text=""):
+    t = (text or "").lower()
+    cam = "1" if any(k in t for k in ("หน้า", "เซลฟี่", "เซลฟี", "selfie", "front")) else "0"
+    os.makedirs(_OUTDIR, exist_ok=True)
+    path = os.path.join(_OUTDIR, f"photo_{int(time.time())}.jpg")
+    try:
+        subprocess.run(["termux-camera-photo", "-c", cam, path],
+                       capture_output=True, timeout=25)
+        if os.path.exists(path) and os.path.getsize(path) > 2000:
+            label = "กล้องหน้า" if cam == "1" else "กล้องหลัง"
+            return (f"📸 ถ่ายด้วย{label}ให้แล้วครับ", path)
+        return "❌ ถ่ายไม่สำเร็จ (เช็คสิทธิ์กล้องของ Termux ในตั้งค่ามือถือด้วยครับ)"
+    except FileNotFoundError:
+        return "❌ ต้องติดตั้งแอป Termux:API + รัน pkg install termux-api ก่อนนะครับ"
+    except Exception as e:
+        return f"❌ ถ่ายรูปไม่สำเร็จ: {e}"
+
+
+def hand_location(text=""):
+    try:
+        r = subprocess.run(["termux-location", "-p", "network"],
+                           capture_output=True, timeout=40)
+        data = json.loads(r.stdout.decode())
+        lat, lon = data["latitude"], data["longitude"]
+        return (f"📍 ตำแหน่งตอนนี้ครับ\n"
+                f"ละติจูด {lat:.5f} / ลองจิจูด {lon:.5f}\n"
+                f"🗺️ แผนที่: https://maps.google.com/?q={lat:.5f},{lon:.5f}")
+    except FileNotFoundError:
+        return "❌ ต้องติดตั้งแอป Termux:API + รัน pkg install termux-api ก่อนนะครับ"
+    except Exception as e:
+        return f"❌ หาตำแหน่งไม่สำเร็จ: {e} (เปิด GPS/อนุญาตตำแหน่งให้ Termux ด้วยครับ)"
+
+
+HANDS["torch"] = hand_torch
+HANDS["camera"] = hand_camera
+HANDS["location"] = hand_location
+
 HANDS["weather"] = hand_weather
 HANDS["rates"] = hand_rates
 HANDS["random"] = hand_random
@@ -374,6 +424,9 @@ SYSTEM_PROMPT = """คุณคือ Jarvis AI ผู้ช่วยส่ว�
 - "weather"       : ถามอากาศ/ฝน/ร้อนไหม — action_text ใส่ชื่อเมืองถ้ามี
 - "rates"         : ถามอัตราแลกเปลี่ยน/เงินต่างประเทศเท่าไหร่บาท
 - "random"        : ทอยเต๋า/สุ่มเลข/เหี่ยวหัวก้อย — action_text เช่น "ทอยเต๋า 2 ดอก" หรือ "สุ่มเลข 1 ถึง 100"
+- "torch"         : เปิด/ปิดไฟฉาย — action_text "on" หรือ "off"
+- "camera"        : ถ่ายรูปจากมือถือส่งเข้าแชต — action_text "back" (หลัง) หรือ "front" (หน้า)
+- "location"      : ถามว่าฉันอยู่ที่ไหน/ตำแหน่งปัจจุบัน/พิกัด
 
 เมื่อมี action ให้ reply สั้น ๆ ว่ากำลังทำให้ (เช่น "กำลังเช็คให้ครับ")
 ถ้าเป็นแค่การคุย ให้ action = null แล้วตอบใน reply ได้เต็มที่
@@ -466,6 +519,14 @@ def fallback_intent(text):
         return "rates", text
     if any(k in t for k in ("ทอยเต๋า", "ทอย", "สุ่มเลข", "หัวก้อย", "เหี่ยวเหรียญ", "เหรียญ")) and len(t) < 60:
         return "random", text
+    if "ไฟฉาย" in t or "ไฟแฟลช" in t or "torch" in t:
+        # "เปิดไฟฉาย" มีทั้ง "เปิด" และ "ปิดไฟฉาย" ซ่อนอยู่ — ถ้ามี "เปิด" ให้ถือว่าเปิดเสมอ
+        state = "off" if ("เปิด" not in t and "ปิด" in t) else "on"
+        return "torch", state
+    if any(k in t for k in ("ถ่ายรูป", "ถ่ายภาพ", "เซลฟี่", "เซลฟี", "selfie")):
+        return "camera", ("front" if any(k in t for k in ("หน้า", "เซลฟี่", "เซลฟี", "selfie")) else "back")
+    if any(k in t for k in ("อยู่ที่ไหน", "ตำแหน่ง", "พิกัด", "จีพีเอส", "gps")) and len(t) < 60:
+        return "location", ""
     return None, ""
 
 
@@ -532,10 +593,15 @@ async def process_message(user_text, channel_id):
         action, action_text = fallback_intent(user_text)
 
     final = None
+    attach = None
     if action and action in HANDS:
         log.info("🦾 ลงมือทำ: %s", action)
         try:
-            final = await asyncio.to_thread(HANDS[action], action_text)
+            res_hand = await asyncio.to_thread(HANDS[action], action_text)
+            if isinstance(res_hand, tuple):      # (ข้อความ, ไฟล์แนบ) เช่น รูปถ่าย
+                final, attach = res_hand
+            else:
+                final = res_hand
         except Exception as e:
             log.error("Action Error (%s): %s", action, e)
             final = None
@@ -546,7 +612,7 @@ async def process_message(user_text, channel_id):
 
     history.append({"role": "user", "content": user_text})
     history.append({"role": "assistant", "content": out[:500]})
-    return out, True
+    return out, True, attach
 
 
 async def reply_long(channel, text):
@@ -615,12 +681,13 @@ tree = app_commands.CommandTree(bot)
 @tree.command(name="ask", description="ถาม Jarvis AI (คุยได้ + สั่งงานได้)")
 async def slash_ask(interaction: discord.Interaction, message: str):
     await interaction.response.defer(thinking=True)
-    reply, _ = await process_message(message, interaction.channel_id)
+    reply, _, attach = await process_message(message, interaction.channel_id)
     path = None
     if VOICE_ENABLED.get(interaction.channel_id, True):
         path = await asyncio.to_thread(speak_sync, reply)
-    if path:
-        await interaction.followup.send(reply[:1900], file=discord.File(path))
+    files = [discord.File(p) for p in (path, attach) if p][:2]
+    if files:
+        await interaction.followup.send(reply[:1900], files=files)
     else:
         await interaction.followup.send(reply[:1900])
 
@@ -667,6 +734,56 @@ async def slash_weather(interaction: discord.Interaction, เมือง: str =
     await interaction.followup.send(out[:1900])
 
 
+@tree.command(name="help", description="📖 ดูความสามารถทั้งหมดของ Jarvis")
+async def slash_help(interaction: discord.Interaction):
+    hands = "\n".join(f"• `{k}`" for k in sorted(HANDS)) or "(โหมดคุยอย่างเดียว)"
+    await interaction.response.send_message(
+        "📖 **ความสามารถของ Jarvis**\n\n"
+        "💬 **คุยได้ทุกเรื่อง** — แตะ @Jarvis หรือทัก DM หรือใช้ /ask\n\n"
+        f"**🦾 มือที่พร้อมใช้ตอนนี้ ({len(HANDS)}):**\n{hands}\n\n"
+        "**ตัวอย่างคำสั่ง:**\n"
+        "• แบตเหลือเท่าไหร่ / เปิด YouTube\n"
+        "• ตั้งเตือนโทรหาแม่พรุ่งนี้ 9 โมง / รายการเตือน\n"
+        "• จดรายจ่าย น้ำมัน 500 / สรุปรายจ่ายเดือนนี้\n"
+        "• อากาศเชียงใหม่ / ดอลลาร์วันนี้เท่าไหร่ / ทอยเต๋า 2 ดอก\n"
+        "• เปิดไฟฉาย / ปิดไฟฉาย / ถ่ายรูปเซลฟี่ / ฉันอยู่ที่ไหน\n"
+        "• เปิดเสียง / ปิดเสียง (พูด + ส่ง voice note)\n\n"
+        "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /help",
+        ephemeral=True)
+
+
+@tree.command(name="torch", description="🔦 เปิด/ปิดไฟฉายมือถือ")
+@app_commands.choices(mode=[
+    app_commands.Choice(name="เปิดไฟฉาย", value="on"),
+    app_commands.Choice(name="ปิดไฟฉาย", value="off"),
+])
+async def slash_torch(interaction: discord.Interaction, mode: app_commands.Choice[str]):
+    await interaction.response.defer(thinking=True)
+    try:
+        out = await asyncio.to_thread(HANDS["torch"], mode.value)
+    except Exception as e:
+        out = f"❌ {e}"
+    await interaction.followup.send(clean_reply(out)[:1900])
+
+
+@tree.command(name="photo", description="📸 ถ่ายรูปจากมือถือส่งเข้าแชต")
+@app_commands.choices(camera=[
+    app_commands.Choice(name="กล้องหลัง", value="0"),
+    app_commands.Choice(name="กล้องหน้า (เซลฟี่)", value="1"),
+])
+async def slash_photo(interaction: discord.Interaction, camera: app_commands.Choice[str] = None):
+    await interaction.response.defer(thinking=True)
+    try:
+        out, attach = await asyncio.to_thread(HANDS["camera"], camera.value if camera else "0")
+    except Exception as e:
+        out, attach = f"❌ {e}", None
+    out = clean_reply(out)
+    if attach:
+        await interaction.followup.send(out[:1900], file=discord.File(attach))
+    else:
+        await interaction.followup.send(out[:1900])
+
+
 @bot.event
 async def on_ready():
     global _last_channel_id
@@ -697,8 +814,14 @@ async def on_message(message: discord.Message):
         text = "สวัสดี"
 
     async with message.channel.typing():
-        reply, want_voice = await process_message(text, message.channel.id)
+        reply, want_voice, attach = await process_message(text, message.channel.id)
     await reply_long(message.channel, reply)
+
+    if attach:
+        try:
+            await message.channel.send(file=discord.File(attach))
+        except Exception as e:
+            log.warning("send attach: %s", e)
 
     if want_voice and VOICE_ENABLED.get(message.channel.id, True):
         await speak_and_note(reply, message.channel.id, message.channel)
