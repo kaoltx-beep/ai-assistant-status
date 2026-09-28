@@ -805,16 +805,21 @@ def _to_num(s):
 
 
 def _parse_job_text(text):
-    """แยกข้อความงานรูปแบบของทาง (ก๊อปมาวางทั้งก้อนได้เลย)"""
+    """แยกข้อความงานจากระบบทาง — ก๊อปมาวางทั้งก้อนได้เลย (รองรับทั้งไลน์และหน้า Order Detail)"""
     data = {"customer": "", "jtype": "", "address": "", "phone": "", "circuit": "",
             "start_len": None, "end_len": None, "total_len": None, "extra": {}}
+    ex = data["extra"]
+
+    # 1) หัวแบบ "1. ชื่อ (09:00 - 12:00) — ประเภทงาน"
     m = re.search(r"^\s*\d+\.\s*(.+?)(?:\s*\(([^)]*)\))?\s*[—–-]+\s*(.+)$",
                   text, re.M)
     if m:
         data["customer"] = m.group(1).strip()
         if m.group(2):
-            data["extra"]["เวลา"] = m.group(2).strip()
+            ex["เวลา"] = m.group(2).strip()
         data["jtype"] = m.group(3).strip()
+
+    # 2) ฟิลด์แบบ "* คีย์: ค่า"
     keymap = {"ที่อยู่": "address", "เบอร์โทร": "phone", "circuit": "circuit",
               "ระยะสายเริ่มต้น": "start_len", "ระยะสายสิ้นสุด": "end_len",
               "ระยะสายรวมทั้งหมด": "total_len"}
@@ -829,10 +834,71 @@ def _parse_job_text(text):
         elif tgt:
             data[tgt] = v or data[tgt]
         elif v:
-            data["extra"][k] = v
+            ex[k] = v
+
+    # 3) ป้ายกำกับบรรทัดเดี่ยวแล้วค่าอยู่บรรทัดถัดไป (สไตล์ Order Detail)
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    label_map = {"ชื่อ-นามสกุล": "customer", "ชื่อนามสกุล": "customer",
+                 "ชื่อลูกค้า": "customer", "ชื่อ": "customer",
+                 "ที่อยู่": "address", "ที่อยู่จัดส่ง": "address",
+                 "เบอร์โทร": "phone", "เบอร์โทรศัพท์": "phone", "phone": "phone"}
+    for i, l in enumerate(lines):
+        lab = l.replace(" ", "").lower()
+        f = None
+        for lk, fv in label_map.items():
+            if lab == lk.replace(" ", "").lower():
+                f = fv
+                break
+        if f and i + 1 < len(lines) and not data[f]:
+            data[f] = lines[i + 1][:300]
+
+    # 4) วันเวลานัดหมาย เช่น "29/09/2026 09:00-12:00"
+    if not ex.get("เวลา"):
+        m2 = re.search(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\s+(\d{1,2}[:.]\d{2}\s*[-–]\s*\d{1,2}[:.]\d{2})", text)
+        if m2:
+            ex["วันเวลา"] = m2.group(1) + " " + m2.group(2)
+
+    # 5) เบอร์โทร 0XXXXXXXXX
+    if not data["phone"]:
+        mp = re.search(r"\b(0\d{8,9})\b", text)
+        if mp:
+            data["phone"] = mp.group(1)
+
+    # 6) ประเภทงานแบบ Order Detail เช่น HSI/Change Address To, FTTH, FIBERTV
+    if not data["jtype"]:
+        mj = re.search(r"(HSI/[^,\n]*|FTTH[^\n,]{0,60}|FIBERTV[^\n,]{0,60}|Change Address[^\n,]{0,60}|New Connection[^\n,]{0,60}|Repair[^\n,]{0,60}|ย้ายออนไลน์[^,\n]{0,60}|ติดตั้งใหม่[^,\n]{0,60})", text)
+        if mj:
+            data["jtype"] = mj.group(1).strip()[:80]
+
+    # 7) ความเร็วเน็ต เช่น 300Mbps
+    ms = re.search(r"\b(\d{2,4})\s*[- ]?\s*Mbps\b", text, re.I)
+    if ms:
+        ex["ความเร็ว"] = ms.group(1) + "Mbps"
+
+    # 8) พิกัดคู่ละติจูด/ลองจิจูด (ไทย: lat ~5-21, lon ~96-106)
+    mc = [x for x in re.findall(r"\b(\d{1,3}\.\d{4,})\b", text)
+          if 5.0 <= float(x) <= 21.0 or 96.0 <= float(x) <= 106.0]
+    if len(mc) >= 2:
+        ex["พิกัด"] = mc[0] + "," + mc[1]
+
+    # 9) เลขที่ใบงาน (ตัวเลขยาว 15+ หลัก) และ LOI/LOID
+    mo = re.search(r"\b(\d{15,})\b", text)
+    if mo:
+        ex["เลขที่ใบงาน"] = mo.group(1)
+    ml = re.search(r"\bLOI[D]?\b\D{0,8}(\d{6,})", text)
+    if ml:
+        ex["LOID"] = ml.group(1)
+
+    # 10) ชื่อสำรอง: บรรทัดสั้น ๆ ที่เป็นภาษาไทย ไม่มีโครงสร้างอื่นปน
     if not data["customer"]:
-        first = next((l.strip() for l in text.splitlines() if l.strip()), "")
-        data["customer"] = re.sub(r"^\d+\.\s*", "", first)[:80]
+        for l in lines:
+            if (len(l) <= 60 and re.search(r"[ก-๙]", l) and ":" not in l
+                    and "," not in l and "/" not in l and not re.search(r"\d{5,}", l)):
+                data["customer"] = re.sub(r"^\d+\.\s*", "", l)[:80]
+                break
+        if not data["customer"]:
+            first = lines[0] if lines else ""
+            data["customer"] = re.sub(r"^\d+\.\s*", "", first)[:80]
     return data
 
 
@@ -907,8 +973,9 @@ def _jobs_today():
     return n or 0, meters or 0
 
 
-_EXTRA_ORDER = ["เวลา", "LOID", "Port L2", "L", "กล่องเราเตอร์", "Mesh",
-                "True ID", "กล้อง", "ใช้สายเดิมสายใหม่", "การเก็บเงิน", "เลขดั้ม"]
+_EXTRA_ORDER = ["เวลา", "วันเวลา", "LOID", "Port L2", "L", "กล่องเราเตอร์", "Mesh",
+                "True ID", "กล้อง", "ใช้สายเดิมสายใหม่", "การเก็บเงิน", "เลขดั้ม",
+                "ความเร็ว", "พิกัด", "เลขที่ใบงาน"]
 
 
 def _fmt_len(v):
@@ -962,8 +1029,8 @@ class JobAddModal(discord.ui.Modal, title="🧰 เปิดงานใหม�
 
 class JobPasteModal(discord.ui.Modal, title="📥 วางข้อความงาน (ก๊อปมาทั้งก้อน)"):
     blob = discord.ui.TextInput(label="ข้อความงาน", style=discord.TextStyle.paragraph,
-                                placeholder="วางรายละเอียดงานที่ก๊อปมาจากระบบทางได้เลยครับ",
-                                max_length=1800)
+                                placeholder="ก๊อปข้อความ/Order Detail จากระบบทางมาวางทั้งก้อนได้เลยครับ",
+                                max_length=4000)
 
     async def on_submit(self, interaction: discord.Interaction):
         d = _parse_job_text(str(self.blob.value))
