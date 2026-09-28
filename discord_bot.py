@@ -315,6 +315,22 @@ VOICE_ENABLED = {}  # channel_id -> bool (ค่าเริ่มต้น: เ
 LAST_HAND = {}  # channel_id -> มือล่าสุดที่เพิ่งทำ (ให้คำสั่งสั้นอย่าง "ปิด" รู้บริบท)
 
 
+def _looks_like_job_dump(text):
+    """ตรวจว่าเป็นก้อนข้อความงานจากระบบทางหรือไม่ — ใช้แค่แนะนำ ไม่จับเป็นงาน"""
+    t = text or ""
+    if len(t) < 60:
+        return False
+    hits = 0
+    if re.search(r"\d{15,}", t):
+        hits += 1
+    if any(k in t for k in ("HSI/", "FIBERTV", "ระยะสายเริ่มต้น", "ระยะสายสิ้นสุด",
+                            "ชื่อ-นามสกุล", "Order Detail")):
+        hits += 1
+    if t.count("*") >= 3 or re.search(r"\d{1,2}/\d{1,2}/\d{2,4}\s+\d{1,2}:", t):
+        hits += 1
+    return hits >= 2
+
+
 def _bare_torch_state(text):
     """คืน 'on'/'off' ถ้าผู้ใช้พิมพ์คำสั้น ๆ ล้วน เช่น 'ปิด' 'เปิด' (จะใช้กับอุปกรณ์ล่าสุด) ไม่งั้น None"""
     bare = (text or "").strip().lower()
@@ -599,6 +615,12 @@ async def process_message(user_text, channel_id):
         res = await asyncio.to_thread(
             HANDS["torch"], "ปิดไฟฉาย" if bare_state == "off" else "เปิดไฟฉาย")
         return res, True, None
+
+    # ก้อนข้อความงานวางในแชต → ไม่จับเป็นงาน (ตามเจ้าของสั่ง) แต่แนะนำปุ่มที่ถูก
+    if _looks_like_job_dump(user_text):
+        return ("📄 นี่ดูเป็นข้อความงานจากระบบทางนะครับ — ผมจะไม่จับใส่ระบบงานเองแน่นอนครับ\n"
+                "ถ้าอยากเปิดเป็นงาน: พิมพ์ **/job** แล้วกดปุ่ม **📥 วางข้อความงาน** "
+                "แล้ววางก้อนนี้ลงไป ผมจะแยกชื่อ/ที่อยู่/เบอร์/ระยะสายให้ครบครับ", False, None)
 
     history = memories.setdefault(channel_id, deque(maxlen=MAX_TURNS * 2))
     try:
