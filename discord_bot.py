@@ -475,14 +475,14 @@ memories = {}
 
 async def process_message(user_text, channel_id):
     """สมอง + มือ ทำงานร่วมกัน — คืน (ข้อความ, ควรพูดไหม)"""
-    # คำสั่งเสียงด่วน
+    # คำสั่งเสียงด่วน (เช็ค "เปิดเสียง" ก่อน "ปิดเสียง" เพราะ "เปิดเสียง" มี "ปิดเสียง" ซ่อนอยู่!)
     t = user_text.strip().lower()
-    if "ปิดเสียง" in t:
-        VOICE_ENABLED[channel_id] = False
-        return "🔇 ปิดเสียงแล้วครับ ต่อจากนี้ตอบเป็นข้อความเฉย ๆ ครับ", False
-    if "เปิดเสียง" in t:
+    if "เปิดเสียง" in t or "เปิดเสียงหน่อย" in t or "เปิด เสียง" in t:
         VOICE_ENABLED[channel_id] = True
         return "🔊 เปิดเสียงแล้วครับ ผมจะพูดตามทุกคำตอบให้ฟังเองครับ", True
+    if "ปิดเสียง" in t or "หุบเสียง" in t or "เงียบๆ" in t or "เงียบ ๆ" in t:
+        VOICE_ENABLED[channel_id] = False
+        return "🔇 ปิดเสียงแล้วครับ ต่อจากนี้ตอบเป็นข้อความเฉย ๆ ครับ", False
 
     history = memories.setdefault(channel_id, deque(maxlen=MAX_TURNS * 2))
     try:
