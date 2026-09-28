@@ -566,9 +566,12 @@ def fallback_intent(text):
         return "net", text
     if "แบต" in t or "battery" in t:
         return "check_battery", ""
-    if any(k in t for k in ("นำทาง", "เอาทาง", "แผนที่", "แมพ")) or \
-            (re.search(r"ไป\s*\S+\s*ยังไง", t)) or \
-            (re.search(r"ใกล้(ฉัน|เรา|ที่นี่)", t) and len(t) < 60):
+    is_map = any(k in t for k in ("นำทาง", "เอาทาง", "แผนที่", "แมพ")) or \
+        bool(re.search(r"ไป\s*\S+\s*ยังไง", t)) or \
+        bool(re.search(r"ใกล้(ฉัน|เรา|ที่นี่)", t) and len(t) < 60)
+    if is_map and ("เปิด" in t or "เข้า" in t) and find_app(t):
+        return "open_app", text   # "เปิดแผนที่" = เปิดแอป Maps จริง
+    if is_map:
         return "map", text
     if any(k in t for k in ("ชีต", "sheet", "ซิงค์", "ส่งงานเข้าสเปรด")) and len(t) < 60 \
             and "เน็ต" not in t:
