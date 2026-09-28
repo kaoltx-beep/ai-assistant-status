@@ -95,9 +95,11 @@ def build_candidates():
         good = [i for i in ids if not any(k in i.lower() for k in BAD_MODEL_KEYWORDS)]
     except Exception as e:
         log.warning("ดึงรายชื่อโมเดลไม่สำเร็จ (%s) — ใช้รายชื่อสำรอง", e)
-    extra = [c for c in FALLBACK_MODELS if c not in good]
-    return ([p for p in PREFERRED_MODELS if p in good]
-            + [i for i in good if i not in PREFERRED_MODELS] + extra)
+    # ลองโมเดลที่ยืนยันสดว่ามีชีวิตก่อนเสมอ (แม้ดึงลิสต์จาก API ไม่สำเร็จ)
+    # จากนั้นค่อยตามด้วยรายชื่อจาก API และลิสต์สำรอง
+    return (PREFERRED_MODELS
+            + [i for i in good if i not in PREFERRED_MODELS]
+            + [c for c in FALLBACK_MODELS if c not in PREFERRED_MODELS])
 
 
 def get_model():
@@ -338,19 +340,23 @@ def voice_note_file(text):
 
     # 1) Edge TTS — เสียงผู้หญิงไทย "Achara" ธรรมชาติที่สุด
     if not _edge_missing:
-        try:
-            subprocess.run(
-                ["edge-tts", "--voice", "th-TH-AcharaNeural", "--text", spoken,
-                 "--write-media", path],
-                capture_output=True, timeout=45)
-            if os.path.exists(path) and os.path.getsize(path) > 1000:
-                return path
-            log.warning("edge-tts ไฟล์ไม่สมบูรณ์ ลอง gTTS ต่อ")
-        except FileNotFoundError:
-            _edge_missing = True
-            log.warning("ยังไม่มี edge-tts — ติดตั้ง: pip install edge-tts (เสียงจะเพราะขึ้นมาก)")
-        except Exception as e:
-            log.warning("edge-tts error: %s — ลอง gTTS ต่อ", e)
+        for attempt in (1, 2):  # เน็ตมือถือสะดุดบ่อย — ลอง 2 ครั้งก่อนสลับ
+            try:
+                subprocess.run(
+                    ["edge-tts", "--voice", "th-TH-AcharaNeural", "--text", spoken,
+                     "--write-media", path],
+                    capture_output=True, timeout=45)
+                if os.path.exists(path) and os.path.getsize(path) > 1000:
+                    return path
+                log.warning("edge-tts ไฟล์ไม่สมบูรณ์ (ครั้งที่ %d/2)", attempt)
+            except FileNotFoundError:
+                _edge_missing = True
+                log.warning("ยังไม่มี edge-tts — ติดตั้ง: pip install edge-tts (เสียงจะเพราะขึ้นมาก)")
+                break
+            except Exception as e:
+                log.warning("edge-tts error: %s (ครั้งที่ %d/2)", e, attempt)
+            if attempt == 1:
+                time.sleep(2)
 
     # 2) gTTS — เสียง Google
     if not _gtts_missing:
