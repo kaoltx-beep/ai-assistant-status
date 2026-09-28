@@ -312,6 +312,17 @@ def clean_reply(text):
 # 🎙️ เสียงผู้หญิง (Google Thai Voice ผ่าน gTTS) — พูด + ทำ voice note
 # ============================================================
 VOICE_ENABLED = {}  # channel_id -> bool (ค่าเริ่มต้น: เปิด)
+LAST_HAND = {}  # channel_id -> มือล่าสุดที่เพิ่งทำ (ให้คำสั่งสั้นอย่าง "ปิด" รู้บริบท)
+
+
+def _bare_torch_state(text):
+    """คืน 'on'/'off' ถ้าผู้ใช้พิมพ์คำสั้น ๆ ล้วน เช่น 'ปิด' 'เปิด' (จะใช้กับอุปกรณ์ล่าสุด) ไม่งั้น None"""
+    bare = (text or "").strip().lower()
+    if bare in ("ปิด", "ปิดดิ", "ปิดซะ", "ดับ", "off", "ปิดไฟ"):
+        return "off"
+    if bare in ("เปิด", "เปิดดิ", "on", "เปิดไฟ"):
+        return "on"
+    return None
 _OUTDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_output")
 _edge_missing = False
 _gtts_missing = False
@@ -584,6 +595,14 @@ async def process_message(user_text, channel_id):
         VOICE_ENABLED[channel_id] = False
         return "🔇 ปิดเสียงแล้วครับ ต่อจากนี้ตอบเป็นข้อความเฉย ๆ ครับ", False, None
 
+    # คำสั่งสั้น "ปิด"/"เปิด" — ถ้าเพิ่งเล่นไฟฉาย ให้หมายถึงไฟฉาย (ไม่ต้องรบกวนสมอง)
+    bare_state = _bare_torch_state(user_text)
+    if bare_state and LAST_HAND.get(channel_id) == "torch" and "torch" in HANDS:
+        log.info("🦾 ลงมือทำ: torch (คำสั่งสั้น -> %s)", bare_state)
+        res = await asyncio.to_thread(
+            HANDS["torch"], "ปิดไฟฉาย" if bare_state == "off" else "เปิดไฟฉาย")
+        return res, True, None
+
     history = memories.setdefault(channel_id, deque(maxlen=MAX_TURNS * 2))
     try:
         result = await asyncio.to_thread(ask_jarvis_sync, user_text, history)
@@ -602,8 +621,13 @@ async def process_message(user_text, channel_id):
     attach = None
     if action and action in HANDS:
         log.info("🦾 ลงมือทำ: %s", action)
+        LAST_HAND[channel_id] = action  # จำไว้ให้คำสั่งสั้น "ปิด"/"เปิด" รอบหน้า
+        # ไฟฉาย: ใช้คำของผู้ใช้จริงตัดสิน เปิด/ปิด (กัน AI ส่ง on/off มาผิด)
+        hand_input = action_text
+        if action == "torch" and any(k in user_text for k in ("เปิด", "ปิด", "ดับ")):
+            hand_input = user_text + " " + (action_text or "")
         try:
-            res_hand = await asyncio.to_thread(HANDS[action], action_text)
+            res_hand = await asyncio.to_thread(HANDS[action], hand_input)
             if isinstance(res_hand, tuple):      # (ข้อความ, ไฟล์แนบ) เช่น รูปถ่าย
                 final, attach = res_hand
             else:
