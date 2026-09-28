@@ -934,6 +934,93 @@ def ocr_image(img_bytes, content_type="image/jpeg", question=None):
 
 
 # ============================================================
+# 🔄 jarvis-self-update: อัปเดตตัวเองจาก GitHub แล้วรีสตาร์ทเอง
+#    ใช้ผ่าน /update ใน Discord หรือเช็คเองทุก 6 ชั่วโมง
+# ============================================================
+import hashlib as _hashlib
+import io as _io
+import shutil as _shutil
+import sys as _sys
+import tarfile as _tarfile
+import urllib.request as _ureq
+
+UPDATE_BRANCH = "arena/01a0e677-ai-assistant-status"
+UPDATE_URL = ("https://codeload.github.com/kaoltx-beep/ai-assistant-status/"
+              "tar.gz/refs/heads/" + UPDATE_BRANCH)
+SELF_PATH = os.path.abspath(__file__)
+_UPDATE_MARKER = "jarvis-self-update"
+
+
+def _fetch_latest_code():
+    """ดาวน์โหลดแพ็กเกจโค้ดล่าสุดแล้งัดเฉพาะ discord_bot.py ออกมา"""
+    req = _ureq.Request(UPDATE_URL, headers={"User-Agent": "jarvis-updater"})
+    blob = _ureq.urlopen(req, timeout=90).read()
+    with _tarfile.open(fileobj=_io.BytesIO(blob), mode="r:gz") as tf:
+        for member in tf.getmembers():
+            if member.name == "discord_bot.py" or member.name.endswith("/discord_bot.py"):
+                data = tf.extractfile(member).read()
+                if len(data) > 20000:
+                    return data
+    return None
+
+
+def self_update():
+    """เช็ค+อัปเดตเป็นเวอร์ชันล่าสุด — คืนข้อความสถานะ (ถ้าอัปเดตแล้วผู้เรียกต้องรีสตาร์ทต่อ)"""
+    try:
+        data = _fetch_latest_code()
+    except Exception as e:
+        return f"❌ ดึงเวอร์ชันใหม่ไม่ได้: {str(e)[:100]}"
+    if not data:
+        return "❌ ไม่เจอ discord_bot.py ในแพ็กเกจล่าสุด"
+    if _UPDATE_MARKER.encode() not in data:
+        return "❌ ไฟล์ใหม่ไม่ผ่านการตรวจ — ยกเลิกอัปเดต"
+    try:
+        same = (open(SELF_PATH, "rb").read() == data)
+    except Exception:
+        same = False
+    if same:
+        return "✅ คุณใช้เวอร์ชันล่าสุดอยู่แล้วครับ"
+    tmp = SELF_PATH + ".new"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    import py_compile as _pyc
+    try:
+        _pyc.compile(tmp, doraise=True)   # ตรวจ syntax ก่อนแตะไฟล์เดิมเสมอ
+    except Exception as e:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return f"❌ ไฟล์ใหม่ syntax พัง — ยกเลิก ({str(e)[:80]})"
+    try:
+        _shutil.copyfile(SELF_PATH, SELF_PATH + ".bak")
+    except Exception:
+        pass
+    os.replace(tmp, SELF_PATH)
+    return "🔄 อัปเดตเสร็จแล้ว — กำลังรีสตาร์ท..."
+
+
+def restart_bot():
+    """เปิดโปรแกรมใหม่ทับกระบวนการปัจจุบัน"""
+    os.execv(_sys.executable, [_sys.executable, SELF_PATH])
+
+
+async def _auto_update_task():
+    """เช็คเวอร์ชันใหม่: ครั้งแรกหลังเปิด 45 วิ จากนั้นทุก 6 ชั่วโมง"""
+    await asyncio.sleep(45)
+    while True:
+        try:
+            msg = await asyncio.to_thread(self_update)
+            if "รีสตาร์ท" in msg:
+                log.info("อัปเดตอัตโนมัติ: %s", msg)
+                await asyncio.sleep(3)
+                restart_bot()
+        except Exception as e:
+            log.warning("auto-update: %s", e)
+        await asyncio.sleep(6 * 3600)
+
+
+# ============================================================
 # 🧰 ระบบงานแบบปุ่ม — เข้าด้วย /job เท่านั้น (แยกจากแชต 100%)
 #    เก็บใน jobs.db ข้างสคริปต์ (ห้ามลบไฟล์นี้!)
 # ============================================================
@@ -1341,6 +1428,16 @@ class JobPanel(discord.ui.View):
             ephemeral=True)
 
 
+@tree.command(name="update", description="🔄 อัปเดต Jarvis เป็นเวอร์ชันล่าสุด (ไม่ต้องแตะ Termux)")
+async def slash_update(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    msg = await asyncio.to_thread(self_update)
+    await interaction.followup.send(msg + ("\nปิด-เปิดใหม่ใน ~5 วินาทีครับ" if "รีสตาร์ท" in msg else ""))
+    if "รีสตาร์ท" in msg:
+        await asyncio.sleep(4)
+        restart_bot()
+
+
 @tree.command(name="job", description="🧰 ระบบงานแบบปุ่ม (แยกจากแชต)")
 async def slash_job(interaction: discord.Interaction):
     jobs = _jobs_open()
@@ -1369,7 +1466,7 @@ async def slash_help(interaction: discord.Interaction):
         "• เปิดเสียง / ปิดเสียง (พูด + ส่ง voice note)\n"
         "• ระบบงาน: พิมพ์ /job แล้วกดปุ่ม (แยกจากแชต 100%)\n"
         "• ส่งรูปมาให้ Jarvis อ่านได้ (ถอดข้อความในรูป / ถามเรื่องในรูป)\n\n"
-        "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /job /help",
+        "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /job /update /help",
         ephemeral=True)
 
 
@@ -1414,6 +1511,7 @@ async def on_ready():
     except Exception as e:
         log.error("Sync slash commands failed: %s", e)
     asyncio.create_task(reminder_loop())
+    asyncio.create_task(_auto_update_task())
     log.info("✅ Jarvis Discord bot online แล้ว! (%s) — มือ: %s",
              bot.user, ", ".join(sorted(HANDS)) or "โหมดคุยอย่างเดียว")
 
