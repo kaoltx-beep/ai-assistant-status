@@ -460,6 +460,12 @@ SYSTEM_PROMPT = """คุณคือ Jarvis AI ผู้ช่วยส่ว�
 - "torch"         : เปิด/ปิดไฟฉาย — action_text "on" หรือ "off"
 - "camera"        : ถ่ายรูปจากมือถือส่งเข้าแชต — action_text "back" (หลัง) หรือ "front" (หน้า)
 - "daily_report"  : สรุปงานวันนี้/รายงานงาน — สรุปงานที่ปิดวันนี้ ระยะสายรวม และงานค้าง
+- "brightness"     : ปรับความสว่างจอ — action_text เช่น "สว่างสุด", "หรี่จอ", "50%"
+- "volume"         : ปรับเสียงเครื่อง — action_text เช่น "เสียงดังสุด", "ลดเสียง", "ปิดเสียงเรียกเข้า" (ห้ามใช้กับระบบเสียงพูดของบอท)
+- "timer"          : ตั้งเวลาถอยหลังแล้วเตือน — action_text เช่น "ตั้งเวลา 10 นาที", "ตั้งเวลา 1 ชั่วโมง 30 นาที"
+- "calc"           : คำนวณเลข — action_text เช่น "คำนวณ 1250*0.07", "25% ของ 4800"
+- "net"            : เช็คสถานะอินเทอร์เน็ต/wifi ของเครื่อง
+- "contacts"       : หาเบอร์จากสมุดโทรศัพท์ในเครื่องจริง — action_text "หาเบอร์ <ชื่อ>"
 - "open_app"       : เปิดแอปบนมือถือ — action_text เป็นชื่อแอป เช่น "youtube", "facebook", "line", "tiktok", "instagram", "shopee", "gmail", "maps" (ถ้าขอเปิดแอปธนาคาร ปฏิเสธสุภาพ ๆ เพื่อความปลอดภัย)
 - "location"      : ถามว่าฉันอยู่ที่ไหน/ตำแหน่งปัจจุบัน/พิกัด
 
@@ -537,6 +543,23 @@ def fallback_intent(text):
     t = text.lower()
     if any(k in t for k in ("สรุปงาน", "รายงานงาน", "งานวันนี้", "รายงานวันนี้")) and len(t) < 50:
         return "daily_report", ""
+    if re.search(r"โทร\s*0\d{8,9}", t):
+        return "open_app", text
+    if any(k in t for k in ("คำนวณ", "คิดเลข", "เท่ากับเท่าไหร่")) or re.search(r"\d+\s*%\s*ของ", t):
+        return "calc", text
+    if any(k in t for k in ("ตั้งเวลา", "จับเวลา", "นับถอยหลัง")):
+        return "timer", text
+    if any(k in t for k in ("ความสว่าง", "สว่างสุด", "หรี่จอ", "หรี่แสง", "แสงจอ")):
+        return "brightness", text
+    if any(k in t for k in ("ลดเสียง", "เพิ่มเสียง", "เสียงดังสุด", "เสียงดังขึ้น",
+                            "เสียงเบาลง", "ปิดเสียงสื่อ", "ปิดเสียงเพลง",
+                            "ปิดเสียงเรียกเข้า", "เสียงริง")):
+        return "volume", text
+    if any(k in t for k in ("หาเบอร์", "เบอร์ของ", "สมุดโทรศัพท์", "รายชื่อในเครื่อง")):
+        return "contacts", text
+    if any(k in t for k in ("เน็ต", "สัญญาณ", "wifi", "ไวไฟ", "ping", "อินเทอร์เน็ต")) \
+            and len(t) < 50 and "เน็ตฟลิก" not in t:
+        return "net", text
     if "แบต" in t or "battery" in t:
         return "check_battery", ""
     if ("เปิด" in t or "เข้า" in t) and find_app(t):
@@ -1531,6 +1554,314 @@ class JobPanel(discord.ui.View):
 # 🔑 /setkey — ใส่ API key เพิ่มจาก Discord (ไม่ต้องแตะ Termux)
 # ============================================================
 # ============================================================
+# 🆕 ชุดความสามารถเพิ่ม: ลูกค้า/สมุดโทรศัพท์/จอ/เสียง/จับเวลา/คิดเลข/เน็ต
+# ============================================================
+
+# ---------- 🔆 ความสว่างจอ ----------
+def hand_brightness(text=""):
+    t = (text or "").lower()
+    m = re.search(r"(\d{1,3})\s*%?", t)
+    if m and 0 <= int(m.group(1)) <= 100 and any(k in t for k in ("%", "เปอร์เซ็นต์", "เปอร์เซ็น")):
+        val = round(int(m.group(1)) * 255 / 100)
+    elif any(k in t for k in ("สว่างสุด", "แสงสุด", "เต็มที่")):
+        val = 255
+    elif any(k in t for k in ("หรี่", "มืด", "เบาตา", "กลางคืน")):
+        val = 40
+    else:
+        val = 128
+    val = max(1, min(255, val))
+    try:
+        subprocess.run(["termux-brightness", str(val)],
+                       capture_output=True, timeout=15)
+        return f"🔆 ปรับความสว่างจอเป็น {val}/255 แล้วครับ"
+    except FileNotFoundError:
+        return "❌ ต้องติดตั้งแอป Termux:API + pkg install termux-api ก่อนนะครับ"
+    except Exception as e:
+        return f"❌ ปรับความสว่างไม่สำเร็จ: {str(e)[:80]}"
+
+
+# ---------- 🔈 ปรับเสียง (สื่อ/เรียกเข้า) ----------
+def hand_volume(text=""):
+    t = (text or "").lower()
+    stream = "ring" if any(k in t for k in ("เรียกเข้า", "ริง", "เสียงกระดิ่ง")) else "music"
+    m = re.search(r"(\d{1,2})\s*%?", t)
+    if "ปิดเสียง" in t or any(k in t for k in ("เงียบ", "เสียงเบาสุด", "มิวท์")):
+        val = 0
+    elif any(k in t for k in ("ดังสุด", "เพิ่มเสียง", "เสียงดังขึ้น", "เสียงดัง")):
+        val = 15
+    elif any(k in t for k in ("ลดเสียง", "เบาลง", "เสียงเบา")):
+        val = 5
+    elif m and int(m.group(1)) <= 100:
+        val = max(0, min(15, round(int(m.group(1)) * 15 / 100)))
+    else:
+        val = 8
+    try:
+        subprocess.run(["termux-volume", stream, str(val)],
+                       capture_output=True, timeout=15)
+        name = "เสียงเรียกเข้า" if stream == "ring" else "เสียงสื่อ/เพลง"
+        return f"🔊 ปรับ{name}เป็น {val}/15 แล้วครับ"
+    except FileNotFoundError:
+        return "❌ ต้องติดตั้งแอป Termux:API + pkg install termux-api ก่อนนะครับ"
+    except Exception as e:
+        return f"❌ ปรับเสียงไม่สำเร็จ: {str(e)[:80]}"
+
+
+# ---------- ⏱️ ตั้งเวลาถอยหลัง ----------
+TIMERS = []   # [(due_datetime, label, channel_id)]
+
+
+def _parse_duration(text):
+    t = (text or "").lower()
+    h = re.search(r"(\d+(?:\.\d+)?)\s*(?:ชั่วโมง|ชม|hr)", t)
+    mi = re.search(r"(\d+(?:\.\d+)?)\s*(?:นาที|min)", t)
+    se = re.search(r"(\d+(?:\.\d+)?)\s*(?:วินาที|วิ|sec)", t)
+    total = 0
+    if h:
+        total += float(h.group(1)) * 3600
+    if mi:
+        total += float(mi.group(1)) * 60
+    if se:
+        total += float(se.group(1))
+    return total
+
+
+def hand_timer(text="", channel_id=None):
+    total = _parse_duration(text)
+    if not total or total > 24 * 3600:
+        return ("พิมพ์แบบนี้ครับ เช่น **ตั้งเวลา 10 นาที** / ตั้งเวลา 1 ชั่วโมง 30 นาที "
+                "/ ตั้งเวลา 90 วินาที")
+    due = datetime.now() + timedelta(seconds=total)
+    TIMERS.append((due, text.strip()[:60], channel_id))
+    mins = total / 60
+    label = f"{mins:g} นาที" if mins >= 1 else f"{total:g} วินาที"
+    return f"⏱️ ตั้งเวลา {label} แล้วครับ — ถึงเวลาผมจะทักเตือนเองเลย"
+
+
+async def timer_loop():
+    while True:
+        try:
+            now = datetime.now()
+            for t in list(TIMERS):
+                due, label, chid = t
+                if now >= due:
+                    TIMERS.remove(t)
+                    ch = bot.get_channel(chid or _last_channel_id)
+                    if ch:
+                        await reply_long(ch, f"⏰ ครบเวลาแล้วครับ! ({label})")
+        except Exception as e:
+            log.warning("timer loop: %s", e)
+        await asyncio.sleep(5)
+
+
+# ---------- 🧮 เครื่องคิดเลข ----------
+def hand_calc(text=""):
+    t = text or ""
+    expr = re.sub(r"(คำนวณ|คิดเลข|เท่ากับเท่าไหร่|เท่าไหร่|บอกหน่อย|[?\s]*$)", " ", t)
+    # "N% ของ M"
+    mp = re.search(r"(\d+(?:\.\d+)?)\s*%\s*ของ\s*(\d+(?:\.\d+)?)", expr)
+    if mp:
+        val = float(mp.group(1)) / 100 * float(mp.group(2))
+        return f"🧮 {mp.group(1)}% ของ {mp.group(2)} = {val:g}"
+    e = (expr.replace("×", "*").replace("÷", "/").replace("x", "*")
+             .replace(",", "").strip(" =+"))
+    if not re.fullmatch(r"[\d+\-*/(). ]+", e) or not re.search(r"\d", e) \
+            or not any(op in e for op in "+-*/"):
+        return "พิมพ์แบบนี้ครับ เช่น **คำนวณ 1250*0.07** หรือ **25% ของ 4800**"
+    try:
+        val = eval(e, {"__builtins__": {}}, {})
+        val = round(val, 4)
+        return f"🧮 {e} = {val:g}"
+    except Exception:
+        return "สมการไม่เข้าใจครับ ลองเช่น คำนวณ (2500+300)*2"
+
+
+# ---------- 📶 สถานะเน็ต ----------
+def hand_net(text=""):
+    out = ["📶 **สถานะเน็ตของเครื่อง**"]
+    try:
+        r = subprocess.run(["ping", "-c", "3", "-W", "3", "8.8.8.8"],
+                           capture_output=True, timeout=25)
+        txt = r.stdout.decode(errors="ignore")
+        m = re.search(r"=\s*([\d.]+)/([\d.]+)/([\d.]+)", txt)
+        loss = re.search(r"(\d+)% packet loss", txt)
+        if m:
+            out.append(f"• Ping เฉลี่ย {float(m.group(2)):.0f} ms"
+                       + (f" (สูงสุด {float(m.group(3)):.0f})" if m.group(3) else ""))
+        if loss:
+            p = int(loss.group(1))
+            out.append(f"• แพ็กเก็ตหาย {p}%"
+                       + (" — เน็ตหลุดบ่อยนะครับ!" if p >= 20 else " — โอเคครับ"))
+        if r.returncode != 0 and not m:
+            out.append("• ❌ ping ไม่ออกเลย — เน็ตหลุดจริง ๆ ด้วยครับ")
+    except FileNotFoundError:
+        pass
+    try:
+        r = subprocess.run(["termux-wifi-connectioninfo"],
+                           capture_output=True, timeout=15)
+        info = json.loads(r.stdout.decode())
+        if info.get("ssid"):
+            out.append(f"• Wi-Fi: {info['ssid']} ({info.get('link_speed_mbps', '?')} Mbps)")
+    except Exception:
+        pass
+    return "\n".join(out) if len(out) > 1 else "📶 เช็คเน็ตไม่ได้ — ลองใหม่ครับ"
+
+
+# ---------- 🔍 หาเบอร์ในสมุดโทรศัพท์จริง ----------
+def hand_contacts(text=""):
+    t = (text or "").strip()
+    q = re.sub(r"(หาเบอร์|เบอร์ของ|เบอร์|สมุดโทรศัพท์|รายชื่อ|ในเครื่อง|ค้นหา|โทร)", " ", t).strip()
+    if not q:
+        return "พิมพ์แบบนี้ครับ เช่น **หาเบอร์สมชาย** — ผมค้นจากสมุดโทรศัพท์ในเครื่องให้"
+    try:
+        r = subprocess.run(["termux-contact-list"], capture_output=True, timeout=30)
+        people = json.loads(r.stdout.decode())
+    except FileNotFoundError:
+        return "❌ ต้องติดตั้งแอป Termux:API + pkg install termux-api ก่อนนะครับ"
+    except Exception as e:
+        return f"❌ อ่านรายชื่อไม่ได้ (ต้องอนุญาตสิทธิ์ Contacts ให้ Termux:API ด้วย): {str(e)[:80]}"
+    hits = []
+    for p in people:
+        name = str(p.get("name", ""))
+        if q.lower() in name.lower():
+            nums = [str(n.get("number", "")) for n in (p.get("number") or [])
+                    if n.get("number")]
+            hits.append((name, nums))
+        if len(hits) >= 5:
+            break
+    if not hits:
+        return f"🔍 ไม่เจอ '{q}' ในสมุดโทรศัพท์ครับ"
+    lines = ["🔍 เจอในสมุดโทรศัพท์ครับ:"]
+    for name, nums in hits:
+        for n in nums[:2]:
+            lines.append(f"• {name}: {n} — พิมพ์ **โทร {n}** เพื่อเปิดหน้าโทร")
+    return "\n".join(lines)
+
+
+# ---------- 📇 สมุดลูกค้า (DB + ปุ่ม) ----------
+CUSTOMERS_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "customers.db")
+
+
+def _cust_conn():
+    conn = _sqlite3.connect(CUSTOMERS_DB)
+    conn.execute("""CREATE TABLE IF NOT EXISTS customers(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL, phone TEXT DEFAULT '',
+        address TEXT DEFAULT '', note TEXT DEFAULT '',
+        created_at TEXT DEFAULT (datetime('now','localtime')))""")
+    return conn
+
+
+def _cust_add(name, phone="", address="", note=""):
+    conn = _cust_conn()
+    cur = conn.execute(
+        "INSERT INTO customers(name,phone,address,note) VALUES(?,?,?,?)",
+        (name.strip(), phone.strip(), address.strip(), note.strip()))
+    conn.commit()
+    cid = cur.lastrowid
+    conn.close()
+    return cid
+
+
+def _cust_search(q=""):
+    conn = _cust_conn()
+    if q:
+        cur = conn.execute(
+            "SELECT id,name,phone,address,note FROM customers "
+            "WHERE name LIKE ? OR phone LIKE ? OR address LIKE ? ORDER BY id DESC LIMIT 20",
+            (f"%{q}%", f"%{q}%", f"%{q}%"))
+    else:
+        cur = conn.execute(
+            "SELECT id,name,phone,address,note FROM customers ORDER BY id DESC LIMIT 20")
+    rows = cur.fetchall()
+    cur.close()
+    return rows
+
+
+def _cust_delete(cid):
+    conn = _cust_conn()
+    conn.execute("DELETE FROM customers WHERE id=?", (cid,))
+    conn.commit()
+    conn.close()
+
+
+class CustomerAddModal(discord.ui.Modal, title="📇 เพิ่มลูกค้า"):
+    name = discord.ui.TextInput(label="ชื่อลูกค้า", max_length=80)
+    phone = discord.ui.TextInput(label="เบอร์โทร", required=False, max_length=30)
+    address = discord.ui.TextInput(label="ที่อยู่", required=False,
+                                   style=discord.TextStyle.paragraph, max_length=250)
+    note = discord.ui.TextInput(label="โน้ต (เช่น รหัสหลังบ้าน, หมาเสี้ยว)", required=False,
+                                max_length=150)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cid = _cust_add(str(self.name.value), str(self.phone.value),
+                        str(self.address.value), str(self.note.value))
+        await interaction.response.send_message(
+            f"📇 เพิ่มลูกค้า #{cid} แล้วครับ: **{self.name.value}**", ephemeral=True)
+
+
+class CustomerSearchModal(discord.ui.Modal, title="🔎 ค้นหาลูกค้า"):
+    q = discord.ui.TextInput(label="ชื่อ/เบอร์/ที่อยู่ (ใส่คำที่จำได้)", max_length=60)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        rows = _cust_search(str(self.q.value))
+        if not rows:
+            await interaction.response.send_message(
+                f"🔍 ไม่เจอลูกค้าที่ตรงกับ '{self.q.value}' ครับ", ephemeral=True)
+            return
+        body = "\n".join(
+            f"#{i} {n} {('☎ ' + p) if p else ''} {('🏠 ' + a[:40]) if a else ''}"
+            for i, n, p, a, _nt in rows)
+        await interaction.response.send_message(
+            f"🔍 **เจอ {len(rows)} รายการ**\n```\n{body[:1800]}\n```", ephemeral=True)
+
+
+class CustomerPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=600)
+
+    @discord.ui.button(label="เพิ่มลูกค้า", emoji="➕",
+                       style=discord.ButtonStyle.success)
+    async def add(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CustomerAddModal())
+
+    @discord.ui.button(label="ค้นหา", emoji="🔎",
+                       style=discord.ButtonStyle.primary)
+    async def search(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CustomerSearchModal())
+
+    @discord.ui.button(label="รายชื่อทั้งหมด", emoji="📋")
+    async def all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        rows = _cust_search()
+        if not rows:
+            await interaction.response.send_message(
+                "📇 ยังไม่มีลูกค้าในสมุดครับ — กด ➕ เพิ่มลูกค้า", ephemeral=True)
+            return
+        body = "\n".join(
+            f"#{i} {n} {('☎ ' + p) if p else ''} {('🏠 ' + a[:40]) if a else ''}"
+            for i, n, p, a, _nt in rows)
+        await interaction.response.send_message(
+            f"📇 **สมุดลูกค้า ({len(rows)})**\n```\n{body[:1800]}\n```",
+            ephemeral=True)
+
+
+@tree.command(name="customers", description="📇 สมุดลูกค้าของคุณ (ปุ่มเพิ่ม/ค้นหา/ดู)")
+async def slash_customers(interaction: discord.Interaction):
+    n = len(_cust_search())
+    await interaction.response.send_message(
+        f"📇 **สมุดลูกค้า** (มี {n} รายการ) — กดปุ่มเลยครับ",
+        view=CustomerPanel(), ephemeral=True)
+
+
+HANDS["brightness"] = hand_brightness
+HANDS["volume"] = hand_volume
+HANDS["timer"] = hand_timer
+HANDS["calc"] = hand_calc
+HANDS["net"] = hand_net
+HANDS["contacts"] = hand_contacts
+
+
+# ============================================================
 # 📲 เปิดแอปบนมือถือ — พิมพ์ "เปิด<ชื่อแอป>" หรือแตะปุ่มใน /apps
 #    (ไม่ต้อง root: ใช้ deep-link ก่อน แล้ว monkey เรียกตัว launcher)
 # ============================================================
@@ -2079,8 +2410,9 @@ async def slash_help(interaction: discord.Interaction):
         "• ส่งรูปมาให้ Jarvis อ่านได้ (ถอดข้อความในรูป / ถามเรื่องในรูป)\n"
         "• โน้ตด่วน: /note • สรุปเช้าทุกวัน 07:00 (งานค้าง + อากาศ)\n"
         "• เปิดแอปมือถือ: พิมพ์ เปิดไลน์/เปิดเฟส/เปิดติ๊กต็อก หรือแตะปุ่มใน /apps\n"
-        "• อัตโนมัติ: สรุปเช้า 07:00 • รายงานเย็น 18:00 • เตือนงานก่อนเริ่ม • เตือนแบต — คุมที่ /auto\n\n"
-        "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /apps /job /note /report /auto /setkey /update /help",
+        "• อัตโนมัติ: สรุปเช้า 07:00 • รายงานเย็น 18:00 • เตือนงานก่อนเริ่ม • เตือนแบต — คุมที่ /auto\n"
+        "• ความสว่างจอ/เสียง/จับเวลา/คิดเลข/เช็คเน็ต/หาเบอร์ในเครื่อง + /customers สมุดลูกค้า\n\n"
+        "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /apps /customers /job /note /report /auto /setkey /update /help",
         ephemeral=True)
 
 
@@ -2130,6 +2462,7 @@ async def on_ready():
     asyncio.create_task(evening_report_loop())
     asyncio.create_task(job_alert_loop())
     asyncio.create_task(battery_loop())
+    asyncio.create_task(timer_loop())
     log.info("✅ Jarvis Discord bot online แล้ว! (%s) — มือ: %s",
              bot.user, ", ".join(sorted(HANDS)) or "โหมดคุยอย่างเดียว")
 
