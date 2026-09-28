@@ -43,24 +43,35 @@ client = Groq(api_key=key)
 
 BAD = ("whisper", "tts", "guard", "embed", "playai")
 PREFERRED = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+FALLBACK = ["llama3-8b-8192", "llama3-70b-8192", "gemma2-9b-it",
+            "mixtral-8x7b-32768", "openai/gpt-oss-20b", "openai/gpt-oss-120b",
+            "qwen/qwen3-32b", "compound-beta"]
 
-print("🔍 ดึงรายชื่อโมเดลจาก Groq...")
+print("🔍 ดึงรายชื่อโมเดลจาก Groq (HTTP ตรง ไม่ผ่าน library)...")
+import json as _json
+from urllib.request import Request, urlopen
+req = Request(
+    "https://api.groq.com/openai/v1/models",
+    headers={"Authorization": "Bearer " + key},
+)
 try:
-    ids = [m.id for m in client.models.list()]
+    data = _json.loads(urlopen(req, timeout=20).read().decode())
+    ids = [m["id"] for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
 except Exception as e:
     print("   ❌ ดึงรายชื่อไม่สำเร็จ: " + str(e)[:300])
-    raise SystemExit(1)
+    ids = []
 
 good = [i for i in ids if not any(k in i.lower() for k in BAD)]
 ordered = ([p for p in PREFERRED if p in good]
-           + [i for i in good if i not in PREFERRED])
+           + [i for i in good if i not in PREFERRED]
+           + [c for c in FALLBACK if c not in good])
 print("   มีทั้งหมด " + str(len(ids)) + " โมเดล (ใช้ทดสอบได้ " + str(len(good)) + "):")
 print("   " + ", ".join(good[:12]))
 print()
 print("🧪 ไล่ทดลองยิงจริงทีละตัว (ตัวไหนตอบได้ = ชนะ)...")
 
 winner = None
-for cand in ordered[:8]:
+for cand in ordered[:14]:
     try:
         r = client.chat.completions.create(
             model=cand,

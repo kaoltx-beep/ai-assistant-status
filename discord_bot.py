@@ -69,9 +69,12 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 
 # ------------------
 # เลือกโมเดลอัตโนมัติ (กันโมเดลถูกปลดจาก Groq — ปัญหา 404 model_not_found)
-# วิธี: ดึงรายชื่อโมเดลที่ยังมีชีวิต → ไล่ทดลองยิงจริงทีละตัว → ตัวไหนตอบ = ใช้ตัวนั้น
+# วิธี: ดึงรายชื่อผ่าน HTTP ตรง → ไล่ทดลองยิงจริงทีละตัว → ตัวไหนตอบ = ใช้ตัวนั้น
 # ------------------
 PREFERRED_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+FALLBACK_MODELS = ["llama3-8b-8192", "llama3-70b-8192", "gemma2-9b-it",
+                   "mixtral-8x7b-32768", "openai/gpt-oss-20b", "openai/gpt-oss-120b",
+                   "qwen/qwen3-32b", "compound-beta"]
 BAD_MODEL_KEYWORDS = ("whisper", "tts", "guard", "embed", "playai")
 
 _current_model = None
@@ -79,16 +82,25 @@ _model_candidates = []
 
 
 def build_candidates():
+    """รวมรายชื่อโมเดลที่จะลอง: ดึงจาก Groq API (HTTP ตรง) + รายชื่อสำรอง"""
     if GROQ_MODEL:  # ผู้ใช้ตั้งเอง → ใช้อันนั้นตัวเดียว
         return [GROQ_MODEL]
+    good = []
     try:
-        ids = [m.id for m in groq_client.models.list()]
+        import json as _json
+        from urllib.request import Request, urlopen
+        req = Request(
+            "https://api.groq.com/openai/v1/models",
+            headers={"Authorization": "Bearer " + GROQ_API_KEY},
+        )
+        data = _json.loads(urlopen(req, timeout=20).read().decode())
+        ids = [m["id"] for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
         good = [i for i in ids if not any(k in i.lower() for k in BAD_MODEL_KEYWORDS)]
-        return ([p for p in PREFERRED_MODELS if p in good]
-                + [i for i in good if i not in PREFERRED_MODELS])
     except Exception as e:
-        log.warning("เช็ครายชื่อโมเดลไม่สำเร็จ (%s) — ใช้ชื่อมาตรฐานแทน", e)
-        return list(PREFERRED_MODELS)
+        log.warning("ดึงรายชื่อโมเดลไม่สำเร็จ (%s) — ใช้รายชื่อสำรอง", e)
+    extra = [c for c in FALLBACK_MODELS if c not in good]
+    return ([p for p in PREFERRED_MODELS if p in good]
+            + [i for i in good if i not in PREFERRED_MODELS] + extra)
 
 
 def get_model():
@@ -98,7 +110,7 @@ def get_model():
         return _current_model
     if not _model_candidates:
         _model_candidates = build_candidates()
-    for cand in _model_candidates[:8]:
+    for cand in _model_candidates[:14]:
         try:
             groq_client.chat.completions.create(
                 model=cand, messages=[{"role": "user", "content": "ping"}], max_tokens=1)
@@ -107,14 +119,16 @@ def get_model():
             return cand
         except Exception as e:
             s = str(e).lower()
-            if "model_not_found" in s or "does not exist" in s or "access" in s:
-                log.info("โมเดล %s ใช้ไม่ได้ (ถูกปลด/ไม่มีสิทธิ์) — ลองตัวถัดไป", cand)
-                continue
             if "429" in s or "rate limit" in s:
                 _current_model = cand
                 log.info("ใช้โมเดล Groq: %s (ช่วงนี้โควตาแน่นนิดหน่อย)", cand)
                 return cand
-            raise
+            if "max_tokens" in s or "completion_tokens" in s:
+                _current_model = cand  # มีโมเดลจริงแค่พารามิเตอร์ไม่ตรง
+                log.info("ใช้โมเดล Groq: %s", cand)
+                return cand
+            log.info("ข้ามโมเดล %s (%s)", cand, str(e)[:80])
+            continue
     raise RuntimeError("ไม่พบโมเดลที่ใช้ได้เลย — เช็ค key/สิทธิ์ที่ console.groq.com")
 
 # ------------------
