@@ -1,28 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-Jarvis Discord Bot v2 — มีมือทำงาน! 🦾
-========================================
-คุยได้ + ลงมือทำได้:
-  🔋 เช็คแบตมือถือ (termux-battery-status / dumpsys)
-  📺 เปิด YouTube ผ่าน MacroDroid webhook
-  ⏰ ตั้งเตือน / ดูรายการเตือน   (plugins/reminder.py)
-  📋 บันทึกงาน / ดูรายการงาน   (plugins/task.py)
-  💰 จดรายจ่าย / สรุปรายจ่าย   (plugins/expense.py)
-  📰 อ่านข่าวล่าสุด             (plugins/news.py)
+Jarvis Discord Bot v4 — สมอง 🧠 + มือ 🦾 + เสียงผู้หญิงน่าฟัง 🎙️
+=================================================================
+ความสามารถ:
+  💬 คุยได้ทุกเรื่อง (Groq AI + จำบริบท 5 รอบ)
+  🔊 ตอบด้วย "เสียงผู้หญิง" (Google Thai Voice) — พูดออกลำโพง
+      + ส่งไฟล์เสียงมีปุ่ม play ใน Discord เหมือน voice note
+  🔋 เช็คแบตมือถือ    📺 เปิด YouTube (MacroDroid)
+  ⏰ ตั้งเตือน + แจ้งเตือนเองเมื่อถึงเวลา (มีเสียงเรียกด้วย)
+  📋 งาน / งานติดตั้ง   💰 รายจ่าย   📰 ข่าว
+  🌤️ อากาศวันนี้        💱 อัตราแลกเปลี่ยน   🎲 ทอยเต๋า/สุ่มเลข
 
-ตัวบอทจะดึงระบบเดิมของโฟลเดอร์ My_bot_kao มาใช้ตรง ๆ (device_actions,
-plugin_loader, plugins/) — ถ้าอะไรพร้อมไม่ครบ มือส่วนนั้นจะปิดอัตโนมัติ
-แต่การคุยยังทำงานปกติ
-
-วิธีใช้เหมือนเดิม:  python discord_bot.py
+ติดตั้งครั้งแรก:  pip install -U discord.py groq python-dotenv gTTS requests
+รัน:              python discord_bot.py
 """
 import asyncio
+import glob
 import json
 import logging
 import os
+import random
 import re
+import sqlite3
 import subprocess
+import time
 from collections import deque
+from datetime import datetime
 
 # ------------------
 # โหลดค่า config (.env ก่อน แล้ว fallback ไป config.py ของ My_bot_kao)
@@ -65,11 +68,11 @@ from groq import Groq
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # ============================================================
-# 🦠 สมอง: เลือกโมเดลอัตโนมัติ (ไล่ทดลองยิงจริง กัน 404 model_not_found)
+# 🧠 สมอง: เลือกโมเดลอัตโนมัติ (ไล่ทดลองยิงจริง กัน 404 model_not_found)
 # ============================================================
-PREFERRED_MODELS = ["openai/gpt-oss-20b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
-FALLBACK_MODELS = ["openai/gpt-oss-120b", "qwen/qwen3-32b", "compound-beta",
-                   "llama3-8b-8192", "gemma2-9b-it", "mixtral-8x7b-32768"]
+PREFERRED_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "llama-3.3-70b-versatile"]
+FALLBACK_MODELS = ["qwen/qwen3-32b", "compound-beta", "llama3-8b-8192",
+                   "gemma2-9b-it", "mixtral-8x7b-32768"]
 BAD_MODEL_KEYWORDS = ("whisper", "tts", "guard", "embed", "playai")
 
 _current_model = None
@@ -140,13 +143,6 @@ except Exception as e:
     plugin_loader = None
     log.warning("plugin_loader ใช้ไม่ได้ (%s)", e)
 
-_PLUGIN_ACTIONS = {
-    "reminder": "⏰ ตั้งเตือน",
-    "task": "📋 งาน",
-    "expense": "💰 รายจ่าย",
-    "news": "📰 ข่าว",
-}
-
 
 def _run_plugin(name, text):
     p = plugin_loader.get_plugin(name) if plugin_loader else None
@@ -162,80 +158,198 @@ def _run_plugin(name, text):
     return None
 
 
-for _name in list(_PLUGIN_ACTIONS):
+for _name in ("reminder", "task", "expense", "news"):
     try:
         if plugin_loader and plugin_loader.get_plugin(_name):
             HANDS[_name] = (lambda n: lambda t: _run_plugin(n, t))(_name)
     except Exception:
         pass
 
-log.info("🦾 มือที่พร้อมใช้: %s", ", ".join(sorted(HANDS)) or "(ไม่มี — โหมดคุยอย่างเดียว)")
 
 # ============================================================
-# 🔊 เสียงพูด (TTS) — ใช้ระบบเดิมของโปรเจกต์ (tts.py → termux-tts-speak)
+# 🌤️ มือใหม่: อากาศ / อัตราแลกเปลี่ยน / สุ่ม (ใช้ได้ทันที ไม่ต้องตั้งค่า)
+# ============================================================
+def hand_weather(text=""):
+    import requests
+    t = text or ""
+    city_map = {"กรุงเทพ": "Bangkok", "กรุงเทพฯ": "Bangkok", "bangkok": "Bangkok",
+                "เชียงใหม่": "Chiang%20Mai", "เชียงราย": "Chiang%20Rai",
+                "ภูเก็ต": "Phuket", "ขอนแก่น": "Khon%20Kaen",
+                "หาดใหญ่": "Hat%20Yai", "พัทยา": "Pattaya", "อุดร": "Udon%20Thani"}
+    city = "Bangkok"
+    for th, en in city_map.items():
+        if th in t.lower():
+            city = en
+            break
+    r = requests.get(f"https://wttr.in/{city}?format=j1", timeout=15)
+    cur = r.json()["current_condition"][0]
+    desc = cur["weatherDesc"][0]["value"]
+    return (f"🌤️ อากาศ{('ที่ ' + city.replace('%20', ' ')) if city != 'Bangkok' else 'กรุงเทพ'}ตอนนี้\n"
+            f"🌡️ {cur['temp_C']}°C (รู้สึกจริง {cur['FeelsLikeC']}°C)\n"
+            f"💧 ความชื้น {cur['humidity']}% • {desc} ครับ")
+
+
+def hand_rates(text=""):
+    import requests
+    t = (text or "").lower()
+    r = requests.get("https://open.er-api.com/v6/latest/THB", timeout=15)
+    rates = r.json().get("rates", {})
+    names = [("ดอลลาร์สหรัฐ", "USD"), ("ยูโร", "EUR"), ("เยนญี่ปุ่น", "JPY"),
+             ("หยวนจีน", "CNY"), ("ปอนด์อังกฤษ", "GBP")]
+    alias = {"ดอลลาร์": "USD", "ดอลล่า": "USD", "usd": "USD", "ยูโร": "EUR", "eur": "EUR",
+             "เยน": "JPY", "jpy": "JPY", "หยวน": "CNY", "cny": "CNY", "ปอนด์": "GBP", "gbp": "GBP"}
+    lines = ["💱 อัตราแลกเปลี่ยนวันนี้ครับ"]
+    for th, code in names:
+        if rates.get(code):
+            lines.append(f"• 1 {code} ({th}) ≈ {1.0 / rates[code]:,.2f} บาท")
+    m = re.search(r"([\d,\.]+)\s*([a-zก-๙]+)", t)
+    if m:
+        amt_raw, word = m.group(1), m.group(2)
+        code = alias.get(word)
+        if code and rates.get(code) and re.search(r"\d", amt_raw):
+            amt = float(amt_raw.replace(",", ""))
+            lines.append(f"➡️ {amt:,.2f} {code} ≈ {amt / rates[code]:,.2f} บาทครับ")
+    return "\n".join(lines)
+
+
+def hand_random(text=""):
+    t = (text or "").lower()
+    if "เหรียญ" in t or "หัวก้อย" in t:
+        return "🪙 ออก '" + random.choice(["หัว", "ก้อย"]) + "' ครับ"
+    m = re.search(r"(\d+)\s*(?:ถึง|-|to)\s*(\d+)", t)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        if a > b:
+            a, b = b, a
+        return f"🎲 สุ่มได้เลข {random.randint(a, b)} ครับ (จาก {a}-{b})"
+    if "เต๋า" in t or "ทอย" in t:
+        m2 = re.search(r"(\d+)\s*(?:ดอก|ลูก|ครั้ง)", t)
+        n = min(int(m2.group(1)), 6) if m2 else 1
+        rolls = [random.randint(1, 6) for _ in range(max(n, 1))]
+        return f"🎲 ทอยได้ {sum(rolls)} แต้มครับ ({' + '.join(map(str, rolls))})"
+    return f"🎲 สุ่มได้เลข {random.randint(1, 100)} ครับ"
+
+
+HANDS["weather"] = hand_weather
+HANDS["rates"] = hand_rates
+HANDS["random"] = hand_random
+
+log.info("🦾 มือที่พร้อมใช้: %s", ", ".join(sorted(HANDS)) or "(โหมดคุยอย่างเดียว)")
+
+
+# ============================================================
+# 🧹 ล้างคำหลุด
+# ============================================================
+def clean_reply(text):
+    t = (text or "").strip()
+    t = re.sub(r"^\s*(คำตอบ|คำตอบคือ|Response|Reply|Answer|Output)\s*[:：]\s*", "", t,
+               flags=re.IGNORECASE)
+    t = re.sub(r"^\s*(Jarvis|จาร์วิส)\s*[:：]\s*", "", t)
+    return t.replace("ค่ะ", "ครับ").replace("คะ", "ครับ").replace("ครับ/ค่ะ", "ครับ")
+
+
+# ============================================================
+# 🎙️ เสียงผู้หญิง (Google Thai Voice ผ่าน gTTS) — พูด + ทำ voice note
 # ============================================================
 VOICE_ENABLED = {}  # channel_id -> bool (ค่าเริ่มต้น: เปิด)
-_tts_broken = False
+_OUTDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_output")
+_gtts_missing = False
+
+
+def voice_note_file(text):
+    """สร้างไฟล์ mp3 เสียงผู้หญิงไทย — คืน path หรือ None ถ้าใช้ไม่ได้"""
+    global _gtts_missing
+    if _gtts_missing or not text:
+        return None
+    try:
+        from gtts import gTTS
+    except ImportError:
+        _gtts_missing = True
+        log.warning("ยังไม่ได้ติดตั้ง gTTS — รัน: pip install gTTS (ชั่วคราวใช้เสียงระบบเดิม)")
+        return None
+    try:
+        os.makedirs(_OUTDIR, exist_ok=True)
+        now = time.time()
+        for f in glob.glob(os.path.join(_OUTDIR, "voice_*.mp3")):
+            try:
+                if now - os.path.getmtime(f) > 1800:
+                    os.remove(f)
+            except Exception:
+                pass
+        path = os.path.join(_OUTDIR, f"voice_{int(now * 10)}.mp3")
+        gTTS(text=text, lang="th").save(path)
+        return path
+    except Exception as e:
+        log.warning("gTTS Error: %s", e)
+        return None
 
 
 def speak_sync(text):
-    """พูดออกลำโพงเครื่อง — ใช้ tts.py เดิมก่อน แล้ว fallback ยิง termux-tts-speak ตรง ๆ"""
-    global _tts_broken
-    if _tts_broken or not text:
-        return
-    spoken = clean_reply(text)[:280]
+    """พูดออกลำโพง (termux-media-player) + คืน path ไฟล์เสียงไว้แนบใน Discord"""
+    spoken = clean_reply(text)[:600]
+    path = voice_note_file(spoken)
+    if path:
+        try:
+            subprocess.run(["termux-media-player", "stop"], capture_output=True, timeout=10)
+        except Exception:
+            pass
+        try:
+            subprocess.Popen(["termux-media-player", "play", path])
+            return path
+        except FileNotFoundError:
+            log.warning("termux-media-player ไม่พบ — ต้องติดตั้งแอป Termux:API ด้วย")
+        except Exception as e:
+            log.warning("play error: %s", e)
+    # fallback: เสียงระบบเดิม
     try:
-        import tts as tts_mod
-        if hasattr(tts_mod, "speak"):
-            tts_mod.speak(spoken)
-            return
+        subprocess.Popen(["termux-tts-speak", spoken[:280]])
     except Exception:
         pass
+    return None
+
+
+async def speak_and_note(text, channel_id, channel=None):
+    """เล่นเสียงออกลำโพง + ส่งไฟล์เสียงเป็น voice note ในแชนเนล"""
+    if not VOICE_ENABLED.get(channel_id, True):
+        return
     try:
-        subprocess.Popen(["termux-tts-speak", spoken])
-    except FileNotFoundError:
-        _tts_broken = True
-        log.warning("TTS ยังไม่พร้อม — ติดตั้งด้วย: pkg install termux-api (+ แอป Termux:API)")
+        path = await asyncio.to_thread(speak_sync, text)
+        if path and channel:
+            await channel.send(file=discord.File(path))
     except Exception as e:
-        log.warning("TTS Error: %s", e)
+        log.warning("speak_and_note: %s", e)
 
-
-async def maybe_speak(text, channel_id):
-    if VOICE_ENABLED.get(channel_id, True):
-        try:
-            await asyncio.to_thread(speak_sync, text)
-        except Exception as e:
-            log.warning("speak error: %s", e)
 
 # ============================================================
 # 🧠 คุยกับ AI: ตอบ JSON {reply, action, action_text}
 # ============================================================
-SYSTEM_PROMPT = """คุณคือ Jarvis AI ผู้ช่วยส่วนตัว ทำงานผ่าน Discord
+SYSTEM_PROMPT = """คุณคือ Jarvis AI ผู้ช่วยส่วนตัว ทำงานผ่าน Discord (เสียงผู้หญิงใจดี)
 
 กฎการพูด:
 - ตอบเป็นภาษาไทยที่เป็นธรรมชาติ เป็นกันเอง อธิบายเข้าใจง่าย
 - สุภาพและจริงใจ ลงท้ายด้วย "ครับ" ทุกประโยค
 - ห้ามใช้คำว่า "ค่ะ" หรือ "คะ" เด็ดขาด
+- ห้ามขึ้นต้นด้วยคำว่า "คำตอบ:" หรือ "Response:" เด็ดขาด
 
-ความสามารถพิเศษ (มือ): คุณสั่งอุปกรณ์และระบบได้ โดยตอบ "action" ดังนี้
-- "check_battery" : ผู้ใช้อยากรู้แบตเตอรี่มือถือ (แบตเหลือเท่าไหร่ แบตตอนนี้)
-- "open_youtube"  : ผู้ใช้อยากเปิด/ดู YouTube บนมือถือ
-- "reminder"      : ตั้งเตือน หรือ ดูรายการเตือน
-                    action_text ต้องเป็นรูปแบบ: "ตั้งเตือน <เรื่อง> YYYY-MM-DD HH:MM"
-                    แปลง "พรุ่งนี้ 9 โมง" เป็นวันเวลาจริงให้เอง เช่น "ตั้งเตือน โทรหาแม่ 2026-09-29 09:00"
-                    หรือถ้าอยากดูรายการ: "ดูรายการเตือน"
-- "task"          : บันทึกงาน / ดูรายการงาน (action_text เช่น "เพิ่มงาน ซ่อมแอร์ลูกค้า" หรือ "รายการงาน")
-- "expense"       : จดรายจ่าย / สรุปรายจ่าย (action_text เช่น "น้ำมัน 500" หรือ "สรุปรายจ่ายเดือนนี้")
-- "news"          : อ่านข่าวล่าสุด
+มือที่คุณสั่งได้ (ตอบ field "action"):
+- "check_battery" : ถามแบตมือถือ (แบตเหลือเท่าไหร่)
+- "open_youtube"  : อยากเปิด/ดู YouTube บนมือถือ
+- "reminder"      : ตั้งเตือน/ดูเตือน — action_text รูปแบบ "ตั้งเตือน <เรื่อง> YYYY-MM-DD HH:MM" (แปลง พรุ่งนี้/เช้า/บ่าย เป็นวันเวลาจริงให้เอง) หรือ "ดูรายการเตือน"
+- "task"          : งาน — action_text "เพิ่มงาน <เรื่อง>" หรือ "รายการงาน"
+- "expense"       : รายจ่าย — action_text "<รายการ> <จำนวนเงิน>" หรือ "สรุปรายจ่ายเดือนนี้"
+- "news"          : ขออ่านข่าว
+- "weather"       : ถามอากาศ/ฝน/ร้อนไหม — action_text ใส่ชื่อเมืองถ้ามี
+- "rates"         : ถามอัตราแลกเปลี่ยน/เงินต่างประเทศเท่าไหร่บาท
+- "random"        : ทอยเต๋า/สุ่มเลข/เหี่ยวหัวก้อย — action_text เช่น "ทอยเต๋า 2 ดอก" หรือ "สุ่มเลข 1 ถึง 100"
 
-ถ้าเป็นการคุยทั่วไป ให้ action = null
+เมื่อมี action ให้ reply สั้น ๆ ว่ากำลังทำให้ (เช่น "กำลังเช็คให้ครับ")
+ถ้าเป็นแค่การคุย ให้ action = null แล้วตอบใน reply ได้เต็มที่
 ตอบกลับเป็น JSON รูปแบบนี้เท่านั้น ห้ามเพิ่มข้อความอื่น:
-{"reply": "ข้อความตอบกลับสั้น ๆ", "action": null, "action_text": ""}"""
+{"reply": "...", "action": null, "action_text": ""}"""
 
 
 def parse_ai_json(raw):
-    """แกะคำตอบ AI ให้เป็น dict — รองรับทุกรูปแบบที่โมเดลนิยมส่งมา"""
-    # gpt-oss บางครั้งส่ง content เป็น list ของ block [{"type":"text","text":"..."}]
+    """แกะคำตอบ AI — รองรับ list-of-blocks ของ gpt-oss ด้วย"""
     if isinstance(raw, list):
         parts = []
         for b in raw:
@@ -266,16 +380,14 @@ def parse_ai_json(raw):
 
 
 def coerce_result(data, raw_text=None):
-    """ดึง {reply, action, action_text} จาก dict ที่แกะได้ แบบยืดหยุ่นสุด"""
+    """ดึง {reply, action, action_text} แบบยืดหยุ่น — ไม่มี JSON ก็ใช้ข้อความดิบ"""
     if not isinstance(data, dict):
-        # โมเดลบางตัวคืน list ของ dict — เอาตัวแรกที่มี action/reply
         if isinstance(data, list):
             for item in data:
                 if isinstance(item, dict) and ("reply" in item or "action" in item):
                     data = item
                     break
         if not isinstance(data, dict):
-            # ไม่มี JSON เลย → ใช้ข้อความดิบเป็น reply (ไม่ error)
             raw = raw_text if isinstance(raw_text, str) else ""
             if isinstance(raw_text, list):
                 raw = "\n".join(
@@ -294,12 +406,9 @@ def coerce_result(data, raw_text=None):
     if isinstance(action, str):
         action = action.strip().lower() or None
     if not reply and raw_text:
-        reply = raw_text.strip()
-    return {
-        "reply": (str(reply) or "รับทราบครับ").strip(),
-        "action": action,
-        "action_text": str(atext).strip(),
-    }
+        reply = str(raw_text).strip()
+    return {"reply": (str(reply) or "รับทราบครับ").strip(),
+            "action": action, "action_text": str(atext).strip()}
 
 
 def fallback_intent(text):
@@ -309,19 +418,25 @@ def fallback_intent(text):
         return "check_battery", ""
     if "youtube" in t or "ยูทูป" in t:
         return "open_youtube", ""
-    if ("ตั้งเตือน" in t) or ("เตือนฉัน" in t) or ("ดูรายการเตือน" in t):
+    if ("ตั้งเตือน" in t) or ("เตือนฉัน" in t) or ("ดูรายการเตือน" in t) or ("รายการเตือน" in t):
         return "reminder", text
     if any(k in t for k in ("รายการงาน", "ดูงาน", "เพิ่มงาน", "บันทึกงาน", "ติดตั้ง")):
         return "task", text
-    if any(k in t for k in ("รายจ่าย", "ค่าใช้จ่าย", "จดบิล", "เดือนนี้")) and any(c.isdigit() for c in t):
+    if any(k in t for k in ("รายจ่าย", "ค่าใช้จ่าย", "จดบิล")) or ("เดือนนี้" in t and any(c.isdigit() for c in t)):
         return "expense", text
     if any(k in t for k in ("ข่าว", "news")) and len(t) < 40:
         return "news", text
+    if any(k in t for k in ("อากาศ", "ฝนตก", "ร้อนไหม", "weather", "หนาวไหม")):
+        return "weather", text
+    if any(k in t for k in ("แลกเปลี่ยน", "อัตราแลก", "ดอลลาร์", "ดอลล่า", "เยน", "ยูโร", "หยวน")) \
+            or ("usd" in t and ("เท่าไหร่" in t or "บาท" in t)):
+        return "rates", text
+    if any(k in t for k in ("ทอยเต๋า", "ทอย", "สุ่มเลข", "หัวก้อย", "เหี่ยวเหรียญ", "เหรียญ")) and len(t) < 60:
+        return "random", text
     return None, ""
 
 
 def ask_jarvis_sync(user_text, history):
-    """เรียก Groq แบบ sync (รันใน thread) — คืน dict {reply, action, action_text}"""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + list(history) + [
         {"role": "user", "content": user_text}
     ]
@@ -335,18 +450,8 @@ def ask_jarvis_sync(user_text, history):
                 kwargs["response_format"] = {"type": "json_object"}
             res = groq_client.chat.completions.create(**kwargs)
             content = res.choices[0].message.content
-            data = parse_ai_json(content)
-            result = coerce_result(data, content)
+            result = coerce_result(parse_ai_json(content), content)
             if result is None:
-                # โมเดลตอบยาวไม่เป็น JSON — ใช้ข้อความดิบเป็น reply เลย
-                plain = content if isinstance(content, str) else ""
-                if isinstance(content, list):
-                    plain = "\n".join(
-                        b.get("text", "") for b in content
-                        if isinstance(b, dict) and b.get("type") == "text")
-                plain = (plain or "").strip()
-                if plain:
-                    return {"reply": plain[:1500], "action": None, "action_text": ""}
                 return {"reply": "รับทราบครับ", "action": None, "action_text": ""}
             return result
         except Exception as e:
@@ -359,39 +464,32 @@ def ask_jarvis_sync(user_text, history):
                 log.warning("โมเดล %s ใช้ไม่ได้แล้ว — เลือกตัวใหม่", dead)
                 continue
             if use_json_mode and ("response_format" in msg or ("json" in msg and "400" in msg)):
-                use_json_mode = False  # โมเดลนี้ไม่ชอบ JSON mode — ปิดแล้วลองใหม่
+                use_json_mode = False
                 continue
             raise
     raise last_err or RuntimeError("AI error")
 
 
-def clean_reply(text):
-    # ล้างคำหลุดจากโมเดล (คำตอบ:, Response:, Reply: ฯลฯ) + คำหลุดเพศ
-    t = (text or "").strip()
-    t = re.sub(r"^\s*(คำตอบ|คำตอบคือ|Response|Reply|Answer|Output)\s*[:：]\s*", "", t,
-               flags=re.IGNORECASE)
-    t = re.sub(r"^\s*(Jarvis|จาร์วิส)\s*[:：]\s*", "", t)
-    return t.replace("ค่ะ", "ครับ").replace("คะ", "ครับ").replace("ครับ/ค่ะ", "ครับ")
+memories = {}
 
 
 async def process_message(user_text, channel_id):
-    """สมอง + มือ ทำงานร่วมกัน — คืนข้อความที่จะส่งกลับ"""
-    # คำสั่งเสียงด่วน (ไม่ต้องผ่าน AI)
+    """สมอง + มือ ทำงานร่วมกัน — คืน (ข้อความ, ควรพูดไหม)"""
+    # คำสั่งเสียงด่วน
     t = user_text.strip().lower()
     if "ปิดเสียง" in t:
         VOICE_ENABLED[channel_id] = False
-        return "🔇 ปิดเสียงแล้วครับ ต่อจากนี้ตอบเป็นข้อความเฉย ๆ ครับ"
+        return "🔇 ปิดเสียงแล้วครับ ต่อจากนี้ตอบเป็นข้อความเฉย ๆ ครับ", False
     if "เปิดเสียง" in t:
         VOICE_ENABLED[channel_id] = True
-        asyncio.create_task(maybe_speak("เปิดเสียงแล้วครับ ผมกลับมาแล้วครับ", channel_id))
-        return "🔊 เปิดเสียงแล้วครับ ผมจะอ่านคำตอบให้ฟังเองครับ"
+        return "🔊 เปิดเสียงแล้วครับ ผมจะพูดตามทุกคำตอบให้ฟังเองครับ", True
 
     history = memories.setdefault(channel_id, deque(maxlen=MAX_TURNS * 2))
     try:
         result = await asyncio.to_thread(ask_jarvis_sync, user_text, history)
     except Exception as e:
         log.error("Groq Error: %s", e)
-        return "ขออภัยครับ ระบบ AI ขัดข้องครับ"
+        return "ขออภัยครับ ระบบ AI ขัดข้องครับ", True
 
     action = result.get("action")
     action_text = result.get("action_text") or user_text
@@ -411,23 +509,64 @@ async def process_message(user_text, channel_id):
     elif action:
         reply = f"{reply}\n(มือ '{action}' ยังไม่พร้อมใช้ในเครื่องนี้ครับ)"
 
-    out = final if final else reply
-    out = clean_reply(out)
+    out = clean_reply(final if final else reply)
 
     history.append({"role": "user", "content": user_text})
     history.append({"role": "assistant", "content": out[:500]})
-
-    # 🔊 พูดตามที่ตอบ (ถ้าเปิดเสียงอยู่)
-    asyncio.create_task(maybe_speak(out, channel_id))
-    return out
-
-
-memories = {}
+    return out, True
 
 
 async def reply_long(channel, text):
     for i in range(0, len(text), 1900):
         await channel.send(text[i:i + 1900])
+
+
+# ============================================================
+# ⏰ แจ้งเตือนเองเมื่อถึงเวลา (อ่าน reminder.db ทุก 20 วินาที)
+# ============================================================
+_last_channel_id = None
+
+
+def due_reminders():
+    items = []
+    try:
+        conn = sqlite3.connect("reminder.db")
+        c = conn.cursor()
+        c.execute("SELECT id, text, remind_time FROM reminders WHERE status='waiting'")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        for rid, text, rtime in c.fetchall():
+            if str(rtime)[:16] <= now:
+                c.execute("UPDATE reminders SET status='done' WHERE id=?", (rid,))
+                items.append(f"⏰ ถึงเวลาแล้วครับ: {text}")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.warning("reminder check: %s", e)
+    return items
+
+
+async def reminder_loop():
+    await bot.wait_until_ready()
+    log.info("⏰ เฝ้าระวังการแจ้งเตือนเปิดแล้ว (ทุก 20 วินาที)")
+    while True:
+        try:
+            items = await asyncio.to_thread(due_reminders)
+            for msg in items:
+                ch = bot.get_channel(_last_channel_id) if _last_channel_id else None
+                if ch is None:
+                    for g in bot.guilds:
+                        for tc in g.text_channels:
+                            if tc.permissions_for(g.me).send_messages:
+                                ch = tc
+                                break
+                        if ch:
+                            break
+                if ch:
+                    await ch.send(msg)
+                    await speak_and_note(msg, ch.id, ch)
+        except Exception as e:
+            log.warning("reminder loop: %s", e)
+        await asyncio.sleep(20)
 
 
 # ============================================================
@@ -443,8 +582,14 @@ tree = app_commands.CommandTree(bot)
 @tree.command(name="ask", description="ถาม Jarvis AI (คุยได้ + สั่งงานได้)")
 async def slash_ask(interaction: discord.Interaction, message: str):
     await interaction.response.defer(thinking=True)
-    reply = await process_message(message, interaction.channel_id)
-    await interaction.followup.send(reply[:1900])
+    reply, _ = await process_message(message, interaction.channel_id)
+    path = None
+    if VOICE_ENABLED.get(interaction.channel_id, True):
+        path = await asyncio.to_thread(speak_sync, reply)
+    if path:
+        await interaction.followup.send(reply[:1900], file=discord.File(path))
+    else:
+        await interaction.followup.send(reply[:1900])
 
 
 @tree.command(name="voice", description="🔊 เปิด/ปิดเสียงพูดของ Jarvis")
@@ -456,9 +601,9 @@ async def slash_voice(interaction: discord.Interaction, mode: app_commands.Choic
     on = (mode.value == "on")
     VOICE_ENABLED[interaction.channel_id] = on
     if on:
-        asyncio.create_task(maybe_speak("เปิดเสียงแล้วครับ", interaction.channel_id))
+        asyncio.create_task(speak_and_note("เปิดเสียงแล้วครับ", interaction.channel_id))
     await interaction.response.send_message(
-        "🔊 เปิดเสียงแล้วครับ ผมจะอ่านคำตอบให้ฟังเองครับ" if on
+        "🔊 เปิดเสียงแล้วครับ ผมจะพูดตามทุกคำตอบให้ฟังเองครับ" if on
         else "🔇 ปิดเสียงแล้วครับ ต่อจากนี้ตอบเป็นข้อความเฉย ๆ ครับ")
 
 
@@ -472,22 +617,39 @@ async def slash_battery(interaction: discord.Interaction):
             out = f"❌ {e}"
     else:
         out = "❌ ระบบเช็คแบตยังไม่พร้อมในเครื่องนี้ครับ"
-    await interaction.followup.send(clean_reply(out)[:1900])
+    out = clean_reply(out)
+    asyncio.create_task(speak_and_note(out, interaction.channel_id))
+    await interaction.followup.send(out[:1900])
+
+
+@tree.command(name="weather", description="🌤️ อากาศวันนี้ (ระบุเมืองได้)")
+async def slash_weather(interaction: discord.Interaction, เมือง: str = "กรุงเทพ"):
+    await interaction.response.defer(thinking=True)
+    try:
+        out = await asyncio.to_thread(hand_weather, เมือง)
+    except Exception as e:
+        out = f"❌ ดึงอากาศไม่สำเร็จ: {e}"
+    out = clean_reply(out)
+    asyncio.create_task(speak_and_note(out, interaction.channel_id))
+    await interaction.followup.send(out[:1900])
 
 
 @bot.event
 async def on_ready():
+    global _last_channel_id
     try:
         await tree.sync()
         log.info("Slash commands synced")
     except Exception as e:
         log.error("Sync slash commands failed: %s", e)
+    asyncio.create_task(reminder_loop())
     log.info("✅ Jarvis Discord bot online แล้ว! (%s) — มือ: %s",
              bot.user, ", ".join(sorted(HANDS)) or "โหมดคุยอย่างเดียว")
 
 
 @bot.event
 async def on_message(message: discord.Message):
+    global _last_channel_id
     if message.author.bot:
         return
 
@@ -496,13 +658,17 @@ async def on_message(message: discord.Message):
     if not (is_dm or mentioned):
         return
 
+    _last_channel_id = message.channel.id
     text = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
     if not text:
         text = "สวัสดี"
 
     async with message.channel.typing():
-        reply = await process_message(text, message.channel.id)
+        reply, want_voice = await process_message(text, message.channel.id)
     await reply_long(message.channel, reply)
+
+    if want_voice and VOICE_ENABLED.get(message.channel.id, True):
+        await speak_and_note(reply, message.channel.id, message.channel)
 
 
 @bot.event
