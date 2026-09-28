@@ -238,7 +238,16 @@ def coerce_result(data, raw_text=None):
                     data = item
                     break
         if not isinstance(data, dict):
-            return None
+            # ไม่มี JSON เลย → ใช้ข้อความดิบเป็น reply (ไม่ error)
+            raw = raw_text if isinstance(raw_text, str) else ""
+            if isinstance(raw_text, list):
+                raw = "\n".join(
+                    b.get("text", "") for b in raw_text
+                    if isinstance(b, dict) and b.get("type") == "text")
+            raw = (raw or "").strip()
+            if not raw:
+                return None
+            return {"reply": raw[:1500], "action": None, "action_text": ""}
     reply = data.get("reply") or data.get("response") or data.get("message") or ""
     action = data.get("action") or data.get("intent") or None
     atext = data.get("action_text") or data.get("action_input") or data.get("input") or ""
