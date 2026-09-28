@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 from collections import deque
 
 # ------------------
@@ -169,6 +170,42 @@ for _name in list(_PLUGIN_ACTIONS):
         pass
 
 log.info("🦾 มือที่พร้อมใช้: %s", ", ".join(sorted(HANDS)) or "(ไม่มี — โหมดคุยอย่างเดียว)")
+
+# ============================================================
+# 🔊 เสียงพูด (TTS) — ใช้ระบบเดิมของโปรเจกต์ (tts.py → termux-tts-speak)
+# ============================================================
+VOICE_ENABLED = {}  # channel_id -> bool (ค่าเริ่มต้น: เปิด)
+_tts_broken = False
+
+
+def speak_sync(text):
+    """พูดออกลำโพงเครื่อง — ใช้ tts.py เดิมก่อน แล้ว fallback ยิง termux-tts-speak ตรง ๆ"""
+    global _tts_broken
+    if _tts_broken or not text:
+        return
+    spoken = clean_reply(text)[:280]
+    try:
+        import tts as tts_mod
+        if hasattr(tts_mod, "speak"):
+            tts_mod.speak(spoken)
+            return
+    except Exception:
+        pass
+    try:
+        subprocess.Popen(["termux-tts-speak", spoken])
+    except FileNotFoundError:
+        _tts_broken = True
+        log.warning("TTS ยังไม่พร้อม — ติดตั้งด้วย: pkg install termux-api (+ แอป Termux:API)")
+    except Exception as e:
+        log.warning("TTS Error: %s", e)
+
+
+async def maybe_speak(text, channel_id):
+    if VOICE_ENABLED.get(channel_id, True):
+        try:
+            await asyncio.to_thread(speak_sync, text)
+        except Exception as e:
+            log.warning("speak error: %s", e)
 
 # ============================================================
 # 🧠 คุยกับ AI: ตอบ JSON {reply, action, action_text}
@@ -335,6 +372,16 @@ def clean_reply(text):
 
 async def process_message(user_text, channel_id):
     """สมอง + มือ ทำงานร่วมกัน — คืนข้อความที่จะส่งกลับ"""
+    # คำสั่งเสียงด่วน (ไม่ต้องผ่าน AI)
+    t = user_text.strip().lower()
+    if "ปิดเสียง" in t:
+        VOICE_ENABLED[channel_id] = False
+        return "🔇 ปิดเสียงแล้วครับ ต่อจากนี้ตอบเป็นข้อความเฉย ๆ ครับ"
+    if "เปิดเสียง" in t:
+        VOICE_ENABLED[channel_id] = True
+        asyncio.create_task(maybe_speak("เปิดเสียงแล้วครับ ผมกลับมาแล้วครับ", channel_id))
+        return "🔊 เปิดเสียงแล้วครับ ผมจะอ่านคำตอบให้ฟังเองครับ"
+
     history = memories.setdefault(channel_id, deque(maxlen=MAX_TURNS * 2))
     try:
         result = await asyncio.to_thread(ask_jarvis_sync, user_text, history)
@@ -365,6 +412,9 @@ async def process_message(user_text, channel_id):
 
     history.append({"role": "user", "content": user_text})
     history.append({"role": "assistant", "content": out[:500]})
+
+    # 🔊 พูดตามที่ตอบ (ถ้าเปิดเสียงอยู่)
+    asyncio.create_task(maybe_speak(out, channel_id))
     return out
 
 
@@ -391,6 +441,21 @@ async def slash_ask(interaction: discord.Interaction, message: str):
     await interaction.response.defer(thinking=True)
     reply = await process_message(message, interaction.channel_id)
     await interaction.followup.send(reply[:1900])
+
+
+@tree.command(name="voice", description="🔊 เปิด/ปิดเสียงพูดของ Jarvis")
+@app_commands.choices(mode=[
+    app_commands.Choice(name="เปิดเสียง (พูดตามทุกคำตอบ)", value="on"),
+    app_commands.Choice(name="ปิดเสียง (ตอบเป็นข้อความเฉย ๆ)", value="off"),
+])
+async def slash_voice(interaction: discord.Interaction, mode: app_commands.Choice[str]):
+    on = (mode.value == "on")
+    VOICE_ENABLED[interaction.channel_id] = on
+    if on:
+        asyncio.create_task(maybe_speak("เปิดเสียงแล้วครับ", interaction.channel_id))
+    await interaction.response.send_message(
+        "🔊 เปิดเสียงแล้วครับ ผมจะอ่านคำตอบให้ฟังเองครับ" if on
+        else "🔇 ปิดเสียงแล้วครับ ต่อจากนี้ตอบเป็นข้อความเฉย ๆ ครับ")
 
 
 @tree.command(name="battery", description="🔋 เช็คแบตมือถือทันที")
