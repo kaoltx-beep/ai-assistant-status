@@ -25,7 +25,7 @@ import sqlite3
 import subprocess
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ------------------
 # โหลดค่า config (.env ก่อน แล้ว fallback ไป config.py ของ My_bot_kao)
@@ -50,6 +50,7 @@ def _get(name, fallback=None):
 
 DISCORD_BOT_TOKEN = _get("DISCORD_BOT_TOKEN")
 GROQ_API_KEY = _get("GROQ_API_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()  # ตาทางเลือก B (ไม่มีก็ได้)
 GROQ_MODEL = _get("GROQ_MODEL")  # ไม่ต้องตั้ง — บอทเลือกโมเดลที่ยังมีชีวิตให้เอง
 MAX_TURNS = 5
 
@@ -458,6 +459,7 @@ SYSTEM_PROMPT = """คุณคือ Jarvis AI ผู้ช่วยส่ว�
 - "random"        : ทอยเต๋า/สุ่มเลข/เหี่ยวหัวก้อย — action_text เช่น "ทอยเต๋า 2 ดอก" หรือ "สุ่มเลข 1 ถึง 100"
 - "torch"         : เปิด/ปิดไฟฉาย — action_text "on" หรือ "off"
 - "camera"        : ถ่ายรูปจากมือถือส่งเข้าแชต — action_text "back" (หลัง) หรือ "front" (หน้า)
+- "open_app"       : เปิดแอปบนมือถือ — action_text เป็นชื่อแอป เช่น "youtube", "facebook", "line", "tiktok", "instagram", "shopee", "gmail", "maps" (ถ้าขอเปิดแอปธนาคาร ปฏิเสธสุภาพ ๆ เพื่อความปลอดภัย)
 - "location"      : ถามว่าฉันอยู่ที่ไหน/ตำแหน่งปัจจุบัน/พิกัด
 
 เมื่อมี action ให้ reply สั้น ๆ ว่ากำลังทำให้ (เช่น "กำลังเช็คให้ครับ")
@@ -534,6 +536,8 @@ def fallback_intent(text):
     t = text.lower()
     if "แบต" in t or "battery" in t:
         return "check_battery", ""
+    if ("เปิด" in t or "เข้า" in t) and find_app(t):
+        return "open_app", text
     if "youtube" in t or "ยูทูป" in t:
         return "open_youtube", ""
     if ("ตั้งเตือน" in t) or ("เตือนฉัน" in t) or ("ดูรายการเตือน" in t) or ("รายการเตือน" in t):
@@ -661,6 +665,12 @@ async def process_message(user_text, channel_id, images=None):
 
     if action == "task":  # ระบบงานของทางถูกถอดออก — ให้ตอบเป็นการคุยแทน
         action = None
+    if action == "open_app" and any(
+            k in (action_text or "").lower()
+            for k in ("ธนาคาร", "bank", "kbank", "scb", "krungsri", "kplus",
+                      "ttb", "bay", "gsb", "baac")):
+        return ("ขออภัยครับ ผมจงใจไม่แตะแอปธนาคารเพื่อความปลอดภัยของเงินคุณครับ "
+                "แนะนำเปิดเองในมือถือเลยครับ 🙏", True, None)
     if not action:
         action, action_text = fallback_intent(user_text)
 
@@ -902,35 +912,121 @@ def _reply_text(resp):
     return clean_reply(str(raw or "")).strip()
 
 
-def ocr_image(img_bytes, content_type="image/jpeg", question=None):
-    """อ่านรูปด้วยโมเดล vision — ไม่ถามอะไร = ถอดข้อความทั้งหมดในรูป"""
-    model = find_vision_model()
-    if not model:
+_gemini_model = None
+
+
+def gemini_vision_model():
+    """หาโมเดล Gemini ที่อ่านภาพได้จากรายชื่อจริงของ Google (ฟรี tier ใช้ได้)"""
+    global _gemini_model
+    if _gemini_model:
+        return _gemini_model
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        from urllib.request import Request, urlopen
+        req = Request(
+            "https://generativelanguage.googleapis.com/v1beta/models?key="
+            + GEMINI_API_KEY)
+        data = json.loads(urlopen(req, timeout=20).read().decode())
+        names = []
+        for m in data.get("models", []):
+            name = (m.get("name") or "").replace("models/", "")
+            methods = m.get("supportedGenerationMethods") or []
+            if ("generateContent" in methods and "flash" in name.lower()
+                    and not any(k in name for k in ("embed", "tts", "image-gen"))):
+                names.append(name)
+        names.sort(key=lambda n: ("flash" not in n, n))
+        if names:
+            globals()["_gemini_model"] = names[0]
+            log.info("ใช้ตา (Gemini): %s", names[0])
+            return names[0]
+    except Exception as e:
+        log.warning("หาโมเดล Gemini ไม่สำเร็จ: %s", e)
+    return None
+
+
+def gemini_ocr(img_bytes, content_type="image/jpeg", question=None):
+    """อ่านรูปด้วย Gemini (ทางเลือก B เมื่อ Groq ไม่มีตาให้)"""
+    if not GEMINI_API_KEY:
         raise RuntimeError(
-            "ไม่มีโมเดลอ่านรูปที่ใช้ได้ใน key นี้ (ถูกปลด/ไม่มีสิทธิ์ทั้งหมด)")
+            "ยังไม่มี GEMINI_API_KEY — ขอฟรีที่ aistudio.google.com/apikey "
+            "แล้วพิมพ์ /setkey gemini <key>")
+    model = gemini_vision_model()
+    if not model:
+        raise RuntimeError("เชื่อมต่อ Gemini ไม่สำเร็จ (เช็ค key/เน็ต)")
     if not question:
         question = ("ถอดข้อความทั้งหมดในรูปนี้เป็นข้อความธรรมดา "
                     "รักษาโครงสร้างบรรทัดและป้ายกำกับเดิมทุกบรรทัด "
-                    "อย่าเพิ่มคำอธิบายหรือสรุปของคุณเอง "
-                    "ถ้ารูปไม่มีข้อความเป็นหลัก ให้อธิบายรูปสั้น ๆ เป็นภาษาไทย")
+                    "อย่าเพิ่มคำอธิบายของคุณเอง")
+    from urllib.request import Request, urlopen
     b64 = _base64.b64encode(img_bytes).decode()
-    for attempt in (1, 2):
-        try:
-            resp = groq_client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": [
-                    {"type": "text", "text": question},
-                    {"type": "image_url", "image_url": {
-                        "url": "data:" + content_type + ";base64," + b64}},
-                ]}],
-                temperature=0.1, max_tokens=2048)
-            return _reply_text(resp) or None
-        except Exception as e:
-            s = str(e).lower()
-            if ("429" in s or "rate limit" in s) and attempt == 1:
-                time.sleep(3)
-                continue
-            raise
+    body = json.dumps({
+        "contents": [{"parts": [
+            {"text": question},
+            {"inline_data": {"mime_type": content_type, "data": b64}},
+        ]}],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048},
+    }).encode()
+    url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+           + model + ":generateContent?key=" + GEMINI_API_KEY)
+    resp = json.loads(urlopen(Request(
+        url, data=body, headers={"Content-Type": "application/json"},
+        method="POST"), timeout=90).read().decode())
+    parts = ((resp.get("candidates") or [{}])[0].get("content") or {}
+             ).get("parts") or []
+    text = "\n".join(p.get("text", "") for p in parts if isinstance(p, dict))
+    return clean_reply(text).strip() or None
+
+
+_DEFAULT_OCR_Q = ("ถอดข้อความทั้งหมดในรูปนี้เป็นข้อความธรรมดา "
+                  "รักษาโครงสร้างบรรทัดและป้ายกำกับเดิมทุกบรรทัด "
+                  "อย่าเพิ่มคำอธิบายหรือสรุปของคุณเอง "
+                  "ถ้ารูปไม่มีข้อความเป็นหลัก ให้อธิบายรูปสั้น ๆ เป็นภาษาไทย")
+
+
+def ocr_image(img_bytes, content_type="image/jpeg", question=None):
+    """อ่านรูป — ตา Groq ก่อน ถ้าไม่มี/พัง ใช้ตา Gemini (พังทั้งคู่ = บอกเหตุผลจริง)"""
+    q = question or _DEFAULT_OCR_Q
+    errors = []
+
+    try:
+        model = find_vision_model()
+    except Exception as e:
+        model = None
+        errors.append("Groq: " + str(e)[:80])
+    if model:
+        b64 = _base64.b64encode(img_bytes).decode()
+        for attempt in (1, 2):
+            try:
+                resp = groq_client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": [
+                        {"type": "text", "text": q},
+                        {"type": "image_url", "image_url": {
+                            "url": "data:" + content_type + ";base64," + b64}},
+                    ]}],
+                    temperature=0.1, max_tokens=2048)
+                out = _reply_text(resp)
+                if out:
+                    return out
+                break
+            except Exception as e:
+                s = str(e).lower()
+                if ("429" in s or "rate limit" in s) and attempt == 1:
+                    time.sleep(3)
+                    continue
+                errors.append("Groq: " + str(e)[:80])
+                break
+
+    try:
+        out = gemini_ocr(img_bytes, content_type, question)
+        if out:
+            return out
+        errors.append("Gemini: ไม่ตอบข้อความกลับ")
+    except Exception as e:
+        errors.append("Gemini: " + str(e)[:100])
+
+    raise RuntimeError(" / ".join(errors) or "ไม่มีตาที่ใช้ได้")
 
 
 # ============================================================
@@ -1428,6 +1524,306 @@ class JobPanel(discord.ui.View):
             ephemeral=True)
 
 
+# ============================================================
+# 🔑 /setkey — ใส่ API key เพิ่มจาก Discord (ไม่ต้องแตะ Termux)
+# ============================================================
+# ============================================================
+# 📲 เปิดแอปบนมือถือ — พิมพ์ "เปิด<ชื่อแอป>" หรือแตะปุ่มใน /apps
+#    (ไม่ต้อง root: ใช้ deep-link ก่อน แล้ว monkey เรียกตัว launcher)
+# ============================================================
+APPS = [
+    {"key": "youtube",   "names": ("ยูทูป", "youtube"),            "scheme": "https://www.youtube.com", "pkg": "com.google.android.youtube",       "label": "▶️ YouTube"},
+    {"key": "facebook",  "names": ("เฟสบุ๊ค", "เฟซบุ๊ก", "เฟส", "facebook"), "scheme": "fb://",          "pkg": "com.facebook.katana",              "label": "📘 Facebook"},
+    {"key": "messenger", "names": ("เมสเซนเจอร์", "เมส", "messenger"), "scheme": "fb-messenger://",       "pkg": "com.facebook.orca",                "label": "💬 Messenger"},
+    {"key": "line",      "names": ("ไลน์", "line"),                 "scheme": "line://",                 "pkg": "jp.naver.line.android",            "label": "💚 LINE"},
+    {"key": "tiktok",    "names": ("ติ๊กต็อก", "ติ๊ก", "tiktok"),   "scheme": "snssdk1233://",           "pkg": "com.zhiliaoapp.musically",         "label": "🎵 TikTok"},
+    {"key": "instagram", "names": ("ไอจี", "อินสตา", "instagram"),  "scheme": "instagram://",            "pkg": "com.instagram.android",            "label": "📸 Instagram"},
+    {"key": "whatsapp",  "names": ("วอทส์แอป", "วัตส์แอพ", "whatsapp"), "scheme": "whatsapp://",         "pkg": "com.whatsapp",                     "label": "🟢 WhatsApp"},
+    {"key": "chrome",    "names": ("โครม", "เบราว์เซอร์", "chrome"), "scheme": "googlechrome://",        "pkg": "com.android.chrome",               "label": "🌐 Chrome"},
+    {"key": "gmail",     "names": ("จีเมล", "เมล", "gmail"),        "scheme": "googlegmail://",          "pkg": "com.google.android.gm",            "label": "✉️ Gmail"},
+    {"key": "shopee",    "names": ("ช้อปปี้", "ชอปปี้", "shopee"),   "scheme": "shopee://",               "pkg": "com.shopee.th",                    "label": "🛍️ Shopee"},
+    {"key": "lazada",    "names": ("ลาซาดา", "lazada"),             "scheme": "lazada://",               "pkg": "th.lazada.android",                "label": "🛒 Lazada"},
+    {"key": "spotify",   "names": ("สปอติฟาย", "สปอติ้", "spotify"),"scheme": "spotify://",              "pkg": "com.spotify.music",                "label": "🎧 Spotify"},
+    {"key": "netflix",   "names": ("เน็ตฟลิกซ์", "เน็ตฟลิก", "netflix"), "scheme": "nflx://",            "pkg": "com.netflix.mediaclient",          "label": "🎬 Netflix"},
+    {"key": "maps",      "names": ("แผนที่", "แมพ", "maps"),        "scheme": "geo:0,0?q=Thailand",      "pkg": "com.google.android.apps.maps",     "label": "🗺️ Maps"},
+    {"key": "dialer",    "names": ("หน้าโทรออก", "โทรศัพท์", "dialer"), "scheme": "tel:",                "pkg": "com.android.dialer",               "label": "📞 โทรออก"},
+]
+
+
+def find_app(text):
+    t = (text or "").lower()
+    best = None
+    for a in APPS:
+        for n in a["names"]:
+            if n in t:
+                best = a
+                if len(n) >= 4:   # ชื่อยาว = ตรงเป้ากว่า
+                    return a
+    return best
+
+
+def hand_open_app(text=""):
+    t = (text or "").lower()
+    # โทรออกเบอร์จริง: "โทร 08x..."
+    m = re.search(r"(?:โทรออก|โทรหา|โทร)\s*(0\d{8,9})", t)
+    if m:
+        try:
+            subprocess.run(["termux-open", "tel:" + m.group(1)],
+                           capture_output=True, timeout=15)
+            return f"📞 เปิดหน้าโทรออก {m.group(1)} แล้วครับ (กดโทรเองนะครับ ผมไม่กล้ากดแทน 😄)"
+        except Exception as e:
+            return f"❌ เปิดหน้าโทรไม่สำเร็จ: {str(e)[:80]}"
+    app = find_app(t)
+    if not app:
+        return ("ไม่รู้จักแอปนี้ครับ — พิมพ์ **/apps** ดูรายชื่อแอปที่เปิดได้ "
+                "(หรือพิมพ์ เปิด + ชื่อแอปที่อยู่ในลิสต์)")
+    try:
+        r = subprocess.run(["termux-open", app["scheme"]],
+                           capture_output=True, timeout=15)
+        if r.returncode == 0:
+            return f"📲 เปิด {app['label']} แล้วครับ"
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(
+            ["monkey", "-p", app["pkg"], "-c", "android.intent.category.LAUNCHER", "1"],
+            capture_output=True, timeout=15)
+        if r.returncode == 0:
+            return f"📲 เปิด {app['label']} แล้วครับ"
+    except Exception:
+        pass
+    return (f"❌ เปิด {app['label']} ไม่สำเร็จ — บางเครื่องบล็อกการเปิดแอปข้ามแอปตอน "
+            f"Termux อยู่หลังบ้าน ลองเปิดหน้า Termux ค้างไว้แล้วสั่งใหม่ครับ "
+            f"(หรือใช้ปุ่ม MacroDroid ตาม SETUP_DISCORD.md)")
+
+
+class AppBtn(discord.ui.Button):
+    def __init__(self, app):
+        super().__init__(label=app["label"][:80],
+                         style=discord.ButtonStyle.secondary)
+        self.app = app
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        out = await asyncio.to_thread(hand_open_app, self.app["key"])
+        await interaction.followup.send(out, ephemeral=True)
+
+
+class AppsPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        for a in APPS[:15]:
+            self.add_item(AppBtn(a))
+
+
+@tree.command(name="apps", description="📲 แตะปุ่มเปิดแอปบนมือถือนี้เลย")
+async def slash_apps(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "📲 **แตะปุ่มเพื่อเปิดแอป** (หรือพิมพ์ เปิด + ชื่อแอปในแชตก็ได้ครับ)\n"
+        "หมายเหตุ: แอปธนาคารจงใจไม่ใส่เพื่อความปลอดภัยครับ",
+        view=AppsPanel(), ephemeral=True)
+
+
+HANDS["open_app"] = hand_open_app
+
+
+@tree.command(name="setkey", description="🔑 ใส่ API key เพิ่ม (ตอนนี้รองรับ: gemini — ตาอ่านรูปฟรี)")
+@app_commands.choices(ชนิด=[
+    app_commands.Choice(name="gemini (ตาอ่านรูป ฟรี)", value="gemini"),
+])
+async def slash_setkey(interaction: discord.Interaction,
+                       ชนิด: app_commands.Choice[str], key: str):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    k = key.strip()
+    if ชนิด.value == "gemini":
+        if not (k.startswith("AIza") and 30 <= len(k) <= 60):
+            await interaction.followup.send(
+                "❌ key ของ Gemini ปกติขึ้นต้น AIza... — เช็คอีกครั้งครับ\n"
+                "ขอ key ฟรี: aistudio.google.com/apikey", ephemeral=True)
+            return
+        envp = None
+        for cand in (os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+                     os.path.join(os.getcwd(), ".env")):
+            if os.path.exists(cand):
+                envp = cand
+                break
+        envp = envp or os.path.join(os.getcwd(), ".env")
+        lines = []
+        try:
+            with open(envp, "r", encoding="utf-8") as f:
+                lines = [l for l in f.readlines()
+                         if not l.strip().startswith("GEMINI_API_KEY=")]
+        except Exception:
+            lines = []
+        lines.append("GEMINI_API_KEY=" + k + "\n")
+        with open(envp, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        os.environ["GEMINI_API_KEY"] = k
+        globals()["GEMINI_API_KEY"] = k
+        globals()["_gemini_model"] = None
+        await interaction.followup.send(
+            "🔑 บันทึก Gemini key ลง .env แล้วครับ — รีสตาร์ทให้เองใน ~3 วินาที\n"
+            "หลังกลับมา online: ส่งรูปใบงานมาทดสอบได้เลยครับ", ephemeral=True)
+        await asyncio.sleep(3)
+        restart_bot()
+    else:
+        await interaction.followup.send("ยังรองรับแค่ gemini ตอนนี้ครับ", ephemeral=True)
+
+
+# ============================================================
+# 📝 ระบบโน้ตแบบปุ่ม — /note (เก็บใน notes.db ข้างสคริปต์ ห้ามลบไฟล์นี้!)
+# ============================================================
+import sqlite3 as _sqlite3n
+
+NOTES_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notes.db")
+
+
+def _notes_conn():
+    conn = _sqlite3n.connect(NOTES_DB)
+    conn.execute("""CREATE TABLE IF NOT EXISTS notes(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        text TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now','localtime')))""")
+    return conn
+
+
+def _notes_add(text):
+    conn = _notes_conn()
+    cur = conn.execute("INSERT INTO notes(text) VALUES(?)", (text.strip(),))
+    conn.commit()
+    jid = cur.lastrowid
+    conn.close()
+    return jid
+
+
+def _notes_all(limit=25):
+    cur = _notes_conn().execute(
+        "SELECT id,text,created_at FROM notes ORDER BY id DESC LIMIT ?", (limit,))
+    rows = cur.fetchall()
+    cur.close()
+    return rows
+
+
+def _notes_delete(nid):
+    conn = _notes_conn()
+    conn.execute("DELETE FROM notes WHERE id=?", (nid,))
+    conn.commit()
+    conn.close()
+
+
+class NoteAddModal(discord.ui.Modal, title="📝 จดโน้ต"):
+    text = discord.ui.TextInput(label="เรื่องที่จด", style=discord.TextStyle.paragraph,
+                                max_length=1500)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        nid = _notes_add(str(self.text.value))
+        await interaction.response.send_message(
+            f"📝 จดโน้ต #{nid} แล้วครับ", ephemeral=True)
+
+
+class _NoteSelect(discord.ui.Select):
+    def __init__(self):
+        rows = _notes_all()
+        super().__init__(placeholder="เลือกโน้ตที่จะลบ",
+                         options=[discord.SelectOption(
+                             label=f"#{i} {t[:60].replace(chr(10), ' ')}",
+                             value=str(i)) for i, t, _c in rows[:25]])
+
+    async def callback(self, interaction: discord.Interaction):
+        _notes_delete(int(self.values[0]))
+        await interaction.response.edit_message(
+            content=f"🗑️ ลบโน้ต #{self.values[0]} แล้วครับ", view=None)
+
+
+class NotePanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=600)
+
+    @discord.ui.button(label="จดโน้ต", emoji="➕",
+                       style=discord.ButtonStyle.success, row=0)
+    async def add(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(NoteAddModal())
+
+    @discord.ui.button(label="ดูโน้ตทั้งหมด", emoji="📋",
+                       style=discord.ButtonStyle.secondary, row=0)
+    async def viewall(self, interaction: discord.Interaction, button: discord.ui.Button):
+        rows = _notes_all()
+        if not rows:
+            await interaction.response.send_message(
+                "📋 ยังไม่มีโน้ตครับ — กด ➕ จดโน้ต เริ่มได้เลย", ephemeral=True)
+            return
+        body = "\n".join(f"#{i} ({c}) {t[:180]}" for i, t, c in rows)
+        await interaction.response.send_message(
+            f"📋 **โน้ตทั้งหมด ({len(rows)})**\n```\n{body[:1800]}\n```",
+            ephemeral=True)
+
+    @discord.ui.button(label="ลบโน้ต", emoji="🗑️",
+                       style=discord.ButtonStyle.danger, row=0)
+    async def delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _notes_all():
+            await interaction.response.send_message(
+                "ยังไม่มีโน้ตให้ลบครับ", ephemeral=True)
+            return
+        view = discord.ui.View(timeout=120)
+        view.add_item(_NoteSelect())
+        await interaction.response.send_message(view=view, ephemeral=True)
+
+
+@tree.command(name="note", description="📝 โน้ตด่วนของเลขา (เข้าด้วยปุ่ม แยกจากแชต)")
+async def slash_note(interaction: discord.Interaction):
+    n = len(_notes_all())
+    await interaction.response.send_message(
+        f"📝 **โน้ตของคุณ** (มี {n} รายการ) — กดปุ่มจัดการได้เลยครับ",
+        view=NotePanel(), ephemeral=True)
+
+
+# ============================================================
+# ☀️ สรุปเช้า — ทักทาย + งานที่ค้าง + อากาศ ทุกวัน 07:00
+# ============================================================
+BRIEF_HOUR = 7
+BRIEF_CITY = "เพชรบูรณ์"
+
+
+async def send_morning_briefing():
+    if not _last_channel_id:
+        return
+    channel = bot.get_channel(_last_channel_id)
+    if not channel:
+        return
+    parts = [f"☀️ อรุณสวัสดิ์ครับ! วันนี้ ({datetime.now().strftime('%d/%m/%Y')}) มีอะไรบ้าง:"]
+    try:
+        jobs = await asyncio.to_thread(_jobs_open)
+        if jobs:
+            names = "\n".join(f"  • #{j['id']} {(j['customer'] or '')[:40]}"
+                               for j in jobs[:5])
+            parts.append(f"🧰 งานกำลังทำ {len(jobs)} งาน:\n{names}")
+        else:
+            parts.append("🧰 ไม่มีงานค้างครับ วันนี้สบาย ๆ")
+    except Exception:
+        pass
+    try:
+        w = await asyncio.to_thread(HANDS["weather"], BRIEF_CITY)
+        if w:
+            parts.append("🌤️ " + str(w).split("\n")[0][:120])
+    except Exception:
+        pass
+    await reply_long(channel, "\n".join(parts))
+
+
+async def morning_briefing_loop():
+    while True:
+        try:
+            now = datetime.now()
+            target = now.replace(hour=BRIEF_HOUR, minute=0, second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            await asyncio.sleep(max(5, (target - now).total_seconds()))
+            await send_morning_briefing()
+        except Exception as e:
+            log.warning("briefing loop: %s", e)
+            await asyncio.sleep(300)
+
+
 @tree.command(name="update", description="🔄 อัปเดต Jarvis เป็นเวอร์ชันล่าสุด (ไม่ต้องแตะ Termux)")
 async def slash_update(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
@@ -1465,8 +1861,10 @@ async def slash_help(interaction: discord.Interaction):
         "• เปิดไฟฉาย / ปิดไฟฉาย / ถ่ายรูปเซลฟี่ / ฉันอยู่ที่ไหน\n"
         "• เปิดเสียง / ปิดเสียง (พูด + ส่ง voice note)\n"
         "• ระบบงาน: พิมพ์ /job แล้วกดปุ่ม (แยกจากแชต 100%)\n"
-        "• ส่งรูปมาให้ Jarvis อ่านได้ (ถอดข้อความในรูป / ถามเรื่องในรูป)\n\n"
-        "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /job /update /help",
+        "• ส่งรูปมาให้ Jarvis อ่านได้ (ถอดข้อความในรูป / ถามเรื่องในรูป)\n"
+        "• โน้ตด่วน: /note • สรุปเช้าทุกวัน 07:00 (งานค้าง + อากาศ)\n"
+        "• เปิดแอปมือถือ: พิมพ์ เปิดไลน์/เปิดเฟส/เปิดติ๊กต็อก หรือแตะปุ่มใน /apps\n\n"
+        "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /apps /job /note /setkey /update /help",
         ephemeral=True)
 
 
@@ -1512,6 +1910,7 @@ async def on_ready():
         log.error("Sync slash commands failed: %s", e)
     asyncio.create_task(reminder_loop())
     asyncio.create_task(_auto_update_task())
+    asyncio.create_task(morning_briefing_loop())
     log.info("✅ Jarvis Discord bot online แล้ว! (%s) — มือ: %s",
              bot.user, ", ".join(sorted(HANDS)) or "โหมดคุยอย่างเดียว")
 
