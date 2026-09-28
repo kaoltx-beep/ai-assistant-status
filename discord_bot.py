@@ -69,36 +69,53 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 
 # ------------------
 # เลือกโมเดลอัตโนมัติ (กันโมเดลถูกปลดจาก Groq — ปัญหา 404 model_not_found)
+# วิธี: ดึงรายชื่อโมเดลที่ยังมีชีวิต → ไล่ทดลองยิงจริงทีละตัว → ตัวไหนตอบ = ใช้ตัวนั้น
 # ------------------
 PREFERRED_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
 BAD_MODEL_KEYWORDS = ("whisper", "tts", "guard", "embed", "playai")
 
 _current_model = None
+_model_candidates = []
 
 
-def pick_model():
-    """ถาม Groq ว่าตอนนี้มีโมเดลอะไรยังใช้ได้ แล้วเลือกอันที่ดีที่สุด"""
-    if GROQ_MODEL:  # ผู้ใช้ตั้งเอง → ใช้อันนั้น
-        return GROQ_MODEL
+def build_candidates():
+    if GROQ_MODEL:  # ผู้ใช้ตั้งเอง → ใช้อันนั้นตัวเดียว
+        return [GROQ_MODEL]
     try:
         ids = [m.id for m in groq_client.models.list()]
         good = [i for i in ids if not any(k in i.lower() for k in BAD_MODEL_KEYWORDS)]
-        for p in PREFERRED_MODELS:
-            if p in good:
-                return p
-        if good:
-            return good[0]
+        return ([p for p in PREFERRED_MODELS if p in good]
+                + [i for i in good if i not in PREFERRED_MODELS])
     except Exception as e:
         log.warning("เช็ครายชื่อโมเดลไม่สำเร็จ (%s) — ใช้ชื่อมาตรฐานแทน", e)
-    return PREFERRED_MODELS[0]
+        return list(PREFERRED_MODELS)
 
 
 def get_model():
-    global _current_model
-    if _current_model is None:
-        _current_model = pick_model()
-        log.info("ใช้โมเดล Groq: %s", _current_model)
-    return _current_model
+    """ค้นหาโมเดลที่ใช้ได้จริง (ทดลองยิงจริงทีละตัว) แล้วจำตัวที่ชนะไว้"""
+    global _current_model, _model_candidates
+    if _current_model:
+        return _current_model
+    if not _model_candidates:
+        _model_candidates = build_candidates()
+    for cand in _model_candidates[:8]:
+        try:
+            groq_client.chat.completions.create(
+                model=cand, messages=[{"role": "user", "content": "ping"}], max_tokens=1)
+            _current_model = cand
+            log.info("ใช้โมเดล Groq: %s", cand)
+            return cand
+        except Exception as e:
+            s = str(e).lower()
+            if "model_not_found" in s or "does not exist" in s or "access" in s:
+                log.info("โมเดล %s ใช้ไม่ได้ (ถูกปลด/ไม่มีสิทธิ์) — ลองตัวถัดไป", cand)
+                continue
+            if "429" in s or "rate limit" in s:
+                _current_model = cand
+                log.info("ใช้โมเดล Groq: %s (ช่วงนี้โควตาแน่นนิดหน่อย)", cand)
+                return cand
+            raise
+    raise RuntimeError("ไม่พบโมเดลที่ใช้ได้เลย — เช็ค key/สิทธิ์ที่ console.groq.com")
 
 # ------------------
 # ความจำรายแชนเนล: channel_id -> deque ของ {"role","content"}
@@ -111,7 +128,7 @@ def ask_jarvis_sync(user_text, history):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + list(history) + [
         {"role": "user", "content": user_text}
     ]
-    global _current_model
+    global _current_model, _model_candidates
     for attempt in (1, 2):  # ครั้งแรกพลาดเพราะโมเดลถูกปลด → เลือกใหม่แล้วลองอีกครั้ง
         try:
             res = groq_client.chat.completions.create(
@@ -123,8 +140,10 @@ def ask_jarvis_sync(user_text, history):
         except Exception as e:
             msg = str(e).lower()
             if attempt == 1 and ("model_not_found" in msg or "does not exist" in msg):
-                log.warning("โมเดล %s ใช้ไม่ได้แล้ว — เลือกโมเดลใหม่ให้อัตโนมัติ", _current_model)
+                dead = _current_model
                 _current_model = None
+                _model_candidates = [c for c in _model_candidates if c != dead]
+                log.warning("โมเดล %s เพิ่งถูกปลด — เลือกตัวใหม่ให้อัตโนมัติ", dead)
                 continue
             raise
     return "ขออภัยครับ ระบบ AI ขัดข้องครับ"
