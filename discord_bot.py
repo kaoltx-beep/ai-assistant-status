@@ -168,7 +168,7 @@ def _run_plugin(name, text):
     return None
 
 
-for _name in ("reminder", "task", "expense", "news"):
+for _name in ("reminder", "expense", "news"):  # ไม่โหลด "task" (ระบบงานของทาง) — ตามคำขอเจ้าของบอท
     try:
         if plugin_loader and plugin_loader.get_plugin(_name):
             HANDS[_name] = (lambda n: lambda t: _run_plugin(n, t))(_name)
@@ -435,7 +435,6 @@ SYSTEM_PROMPT = """คุณคือ Jarvis AI ผู้ช่วยส่ว�
 - "check_battery" : ถามแบตมือถือ (แบตเหลือเท่าไหร่)
 - "open_youtube"  : อยากเปิด/ดู YouTube บนมือถือ
 - "reminder"      : ตั้งเตือน/ดูเตือน — action_text รูปแบบ "ตั้งเตือน <เรื่อง> YYYY-MM-DD HH:MM" (แปลง พรุ่งนี้/เช้า/บ่าย เป็นวันเวลาจริงให้เอง) หรือ "ดูรายการเตือน"
-- "task"          : งาน — action_text "เพิ่มงาน <เรื่อง>" หรือ "รายการงาน"
 - "expense"       : รายจ่าย — action_text "<รายการ> <จำนวนเงิน>" หรือ "สรุปรายจ่ายเดือนนี้"
 - "news"          : ขออ่านข่าว
 - "weather"       : ถามอากาศ/ฝน/ร้อนไหม — action_text ใส่ชื่อเมืองถ้ามี
@@ -523,8 +522,6 @@ def fallback_intent(text):
         return "open_youtube", ""
     if ("ตั้งเตือน" in t) or ("เตือนฉัน" in t) or ("ดูรายการเตือน" in t) or ("รายการเตือน" in t):
         return "reminder", text
-    if any(k in t for k in ("รายการงาน", "ดูงาน", "เพิ่มงาน", "บันทึกงาน", "ติดตั้ง")):
-        return "task", text
     if any(k in t for k in ("รายจ่าย", "ค่าใช้จ่าย", "จดบิล")) or ("เดือนนี้" in t and any(c.isdigit() for c in t)):
         return "expense", text
     if any(k in t for k in ("ข่าว", "news")) and len(t) < 40:
@@ -614,6 +611,8 @@ async def process_message(user_text, channel_id):
     action_text = result.get("action_text") or user_text
     reply = result.get("reply") or "รับทราบครับ"
 
+    if action == "task":  # ระบบงานของทางถูกถอดออก — ให้ตอบเป็นการคุยแทน
+        action = None
     if not action:
         action, action_text = fallback_intent(user_text)
 
