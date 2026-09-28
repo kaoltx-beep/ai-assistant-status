@@ -597,7 +597,7 @@ def ask_jarvis_sync(user_text, history):
 memories = {}
 
 
-async def process_message(user_text, channel_id):
+async def process_message(user_text, channel_id, images=None):
     """สมอง + มือ ทำงานร่วมกัน — คืน (ข้อความ, ควรพูดไหม)"""
     # คำสั่งเสียงด่วน (เช็ค "เปิดเสียง" ก่อน "ปิดเสียง" เพราะ "เปิดเสียง" มี "ปิดเสียง" ซ่อนอยู่!)
     t = user_text.strip().lower()
@@ -607,6 +607,28 @@ async def process_message(user_text, channel_id):
     if "ปิดเสียง" in t or "หุบเสียง" in t or "เงียบๆ" in t or "เงียบ ๆ" in t:
         VOICE_ENABLED[channel_id] = False
         return "🔇 ปิดเสียงแล้วครับ ต่อจากนี้ตอบเป็นข้อความเฉย ๆ ครับ", False, None
+
+    # 👀 มีรูปแนบ → อ่านรูป (พิมพ์คำถามมาด้วย = ถามเรื่องรูป ไม่งั้นถอดข้อความ)
+    if images:
+        q = user_text if len((user_text or "").strip()) > 2 else None
+        outs = []
+        for img_b, ct in images[:2]:
+            try:
+                t = await asyncio.to_thread(ocr_image, img_b, ct, q)
+            except Exception as e:
+                log.error("vision error: %s", e)
+                t = None
+            if t:
+                outs.append(t.strip())
+        if outs:
+            body = "\n".join(outs).replace("```", "``")[:1600]
+            tip = ""
+            if not q and _looks_like_job_dump(body):
+                tip = ("\n\n💡 นี่ดูเป็นใบงานของทาง — กดคัดลอกข้อความในกล่องด้านบน "
+                       "แล้วไปพิมพ์ /job → ปุ่ม 📥 วางข้อความงาน วางลงไปได้เลยครับ")
+            return ("📷 อ่านรูปแล้วครับ:\n```text\n" + body + "\n```" + tip,
+                    False, None)
+        return ("ขออภัยครับ อ่านรูปไม่สำเร็จ — ลองส่งรูปใหม่อีกครั้งครับ", True, None)
 
     # คำสั่งสั้น "ปิด"/"เปิด" — ถ้าเพิ่งเล่นไฟฉาย ให้หมายถึงไฟฉาย (ไม่ต้องรบกวนสมอง)
     bare_state = _bare_torch_state(user_text)
@@ -783,6 +805,91 @@ async def slash_weather(interaction: discord.Interaction, เมือง: str =
     out = clean_reply(out)
     asyncio.create_task(speak_and_note(out, interaction.channel_id))
     await interaction.followup.send(out[:1900])
+
+
+# ============================================================
+# 👀 ตา: อ่านรูปที่แนบมา (Groq vision — llama-4 scout/maverick)
+# ============================================================
+import base64 as _base64
+
+VISION_MODELS = [
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
+]
+_vision_model = None
+_TINY_PNG = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+             "AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+
+
+def find_vision_model():
+    """หาโมเดลอ่านภาพที่ยังมีชีวิต — โปรบด้วยรูปจิ๋ว (ตอบได้ = อ่านรูปได้จริง)"""
+    global _vision_model
+    if _vision_model:
+        return _vision_model
+    for cand in VISION_MODELS:
+        try:
+            groq_client.chat.completions.create(
+                model=cand,
+                messages=[{"role": "user", "content": [
+                    {"type": "text", "text": "รูปนี้เห็นอะไร ตอบสั้นที่สุด"},
+                    {"type": "image_url", "image_url": {
+                        "url": "data:image/png;base64," + _TINY_PNG}},
+                ]}])
+            _vision_model = cand
+            log.info("ใช้ตา (vision): %s", cand)
+            return cand
+        except Exception as e:
+            s = str(e).lower()
+            if any(k in s for k in ("decommission", "model_not_found",
+                                    "does not exist", "do not have access")):
+                log.info("ข้ามโมเดลภาพ %s (ถูกปลด/ไม่มีสิทธิ์)", cand)
+                continue
+            _vision_model = cand
+            log.info("ใช้ตา (vision): %s (หมายเหตุ: %s)", cand, str(e)[:70])
+            return cand
+    return None
+
+
+def _reply_text(resp):
+    """แกะข้อความจากคำตอบโมเดล — รองรับ content เป็น list-of-blocks ด้วย"""
+    try:
+        raw = resp.choices[0].message.content
+    except Exception:
+        return ""
+    if isinstance(raw, list):
+        parts = []
+        for b in raw:
+            if isinstance(b, dict):
+                if b.get("type") == "text" and b.get("text"):
+                    parts.append(b["text"])
+                elif isinstance(b.get("content"), str):
+                    parts.append(b["content"])
+            elif isinstance(b, str):
+                parts.append(b)
+        raw = "\n".join(parts)
+    return clean_reply(str(raw or "")).strip()
+
+
+def ocr_image(img_bytes, content_type="image/jpeg", question=None):
+    """อ่านรูปด้วยโมเดล vision — ไม่ถามอะไร = ถอดข้อความทั้งหมดในรูป"""
+    model = find_vision_model()
+    if not model:
+        return None
+    if not question:
+        question = ("ถอดข้อความทั้งหมดในรูปนี้เป็นข้อความธรรมดา "
+                    "รักษาโครงสร้างบรรทัดและป้ายกำกับเดิมทุกบรรทัด "
+                    "อย่าเพิ่มคำอธิบายหรือสรุปของคุณเอง "
+                    "ถ้ารูปไม่มีข้อความเป็นหลัก ให้อธิบายรูปสั้น ๆ เป็นภาษาไทย")
+    b64 = _base64.b64encode(img_bytes).decode()
+    resp = groq_client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": [
+            {"type": "text", "text": question},
+            {"type": "image_url", "image_url": {
+                "url": "data:" + content_type + ";base64," + b64}},
+        ]}],
+        temperature=0.1, max_tokens=1500)
+    return _reply_text(resp) or None
 
 
 # ============================================================
@@ -1219,7 +1326,8 @@ async def slash_help(interaction: discord.Interaction):
         "• อากาศเชียงใหม่ / ดอลลาร์วันนี้เท่าไหร่ / ทอยเต๋า 2 ดอก\n"
         "• เปิดไฟฉาย / ปิดไฟฉาย / ถ่ายรูปเซลฟี่ / ฉันอยู่ที่ไหน\n"
         "• เปิดเสียง / ปิดเสียง (พูด + ส่ง voice note)\n"
-        "• ระบบงาน: พิมพ์ /job แล้วกดปุ่ม (แยกจากแชต 100%)\n\n"
+        "• ระบบงาน: พิมพ์ /job แล้วกดปุ่ม (แยกจากแชต 100%)\n"
+        "• ส่งรูปมาให้ Jarvis อ่านได้ (ถอดข้อความในรูป / ถามเรื่องในรูป)\n\n"
         "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /job /help",
         ephemeral=True)
 
@@ -1282,11 +1390,22 @@ async def on_message(message: discord.Message):
 
     _last_channel_id = message.channel.id
     text = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
-    if not text:
+
+    # 👀 เก็บรูปที่แนบมาด้วย (สูงสุด 2 รูป)
+    images = []
+    for a in (message.attachments or [])[:2]:
+        ct = a.content_type or ""
+        if ct.startswith("image/"):
+            try:
+                images.append((await a.read(), ct))
+            except Exception as e:
+                log.warning("โหลดรูปแนบไม่ได้: %s", e)
+    if not text and not images:
         text = "สวัสดี"
 
     async with message.channel.typing():
-        reply, want_voice, attach = await process_message(text, message.channel.id)
+        reply, want_voice, attach = await process_message(
+            text, message.channel.id, images or None)
     await reply_long(message.channel, reply)
 
     if attach:
