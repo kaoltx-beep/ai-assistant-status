@@ -466,7 +466,8 @@ SYSTEM_PROMPT = """คุณคือ Jarvis AI ผู้ช่วยส่ว�
 - "calc"           : คำนวณเลข — action_text เช่น "คำนวณ 1250*0.07", "25% ของ 4800"
 - "net"            : เช็คสถานะอินเทอร์เน็ต/wifi ของเครื่อง
 - "contacts"       : หาเบอร์จากสมุดโทรศัพท์ในเครื่องจริง — action_text "หาเบอร์ <ชื่อ>"
-- "open_app"       : เปิดแอปบนมือถือ — action_text เป็นชื่อแอป เช่น "youtube", "facebook", "line", "tiktok", "instagram", "shopee", "gmail", "maps" (ถ้าขอเปิดแอปธนาคาร ปฏิเสธสุภาพ ๆ เพื่อความปลอดภัย)
+- "applist"        : ขอดูรายชื่อแอปที่ติดตั้งในเครื่อง
+- "open_app"       : เปิดแอปบนมือถือ — รู้จัก "รูปงาน"/"timestamp" (แอป Timestamp Camera ถ่ายรูปประทับเวลา) ด้วย — action_text เป็นชื่อแอป เช่น "youtube", "facebook", "line", "tiktok", "instagram", "shopee", "gmail", "maps" (ถ้าขอเปิดแอปธนาคาร ปฏิเสธสุภาพ ๆ เพื่อความปลอดภัย)
 - "location"      : ถามว่าฉันอยู่ที่ไหน/ตำแหน่งปัจจุบัน/พิกัด
 
 เมื่อมี action ให้ reply สั้น ๆ ว่ากำลังทำให้ (เช่น "กำลังเช็คให้ครับ")
@@ -562,6 +563,10 @@ def fallback_intent(text):
         return "net", text
     if "แบต" in t or "battery" in t:
         return "check_battery", ""
+    if any(k in t for k in ("รูปงาน", "timestamp", "ไทม์สแตมป์", "ไทม์แสตมป์")):
+        return "open_app", text
+    if any(k in t for k in ("รายชื่อแอป", "แอปในเครื่อง", "แอปที่ติดตั้ง")):
+        return "applist", ""
     if ("เปิด" in t or "เข้า" in t) and find_app(t):
         return "open_app", text
     if "youtube" in t or "ยูทูป" in t:
@@ -1881,7 +1886,8 @@ def chooser_options(text, channel_id):
         if has("หน้า", "เซลฟี่", "เซลฟี", "หลัง", "selfie"):
             return None
         return [("📸 กล้องหลัง", "camera", "หลัง"),
-                ("🤳 เซลฟี่ (กล้องหน้า)", "camera", "หน้า")]
+                ("🤳 เซลฟี่ (กล้องหน้า)", "camera", "หน้า"),
+                ("🕘 รูปงาน (Timestamp)", "open_app", "รูปงาน timestamp")]
     # ความสว่างแต่ไม่บอกทิศทาง
     if has("ความสว่าง", "แสงจอ"):
         # "ความสว่าง" มี "สว่าง" ซ่อนอยู่ — เช็คทิศทางแบบเฉพาะเจาะจง
@@ -1974,13 +1980,56 @@ APPS = [
     {"key": "netflix",   "names": ("เน็ตฟลิกซ์", "เน็ตฟลิก", "netflix"), "scheme": "nflx://",            "pkg": "com.netflix.mediaclient",          "label": "🎬 Netflix"},
     {"key": "maps",      "names": ("แผนที่", "แมพ", "maps"),        "scheme": "geo:0,0?q=Thailand",      "pkg": "com.google.android.apps.maps",     "label": "🗺️ Maps"},
     {"key": "dialer",    "names": ("หน้าโทรออก", "โทรศัพท์", "dialer"), "scheme": "tel:",                "pkg": "com.android.dialer",               "label": "📞 โทรออก"},
+    {"key": "timestamp", "names": ("รูปงาน", "timestamp", "ไทม์สแตมป์", "ไทม์แสตมป์", "สแตมป์"),
+     "scheme": None, "pkgs": ("com.jeyluta.timestampcamerafree", "com.jeyluta.timestampcamera"),
+     "pkg": None, "label": "🕘 รูปงาน Timestamp"},
 ]
+
+
+CUSTOM_APPS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "apps_custom.json")
+CUSTOM_APPS = []   # [{"pkg":..., "label":...}] เพิ่มผ่าน /addapp
+
+
+def _load_custom_apps():
+    global CUSTOM_APPS
+    try:
+        with open(CUSTOM_APPS_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        CUSTOM_APPS = [{"pkg": x["pkg"], "label": x["label"],
+                        "key": x["pkg"],
+                        "names": tuple(set(str(x["label"]).lower().split()) | {x["pkg"]}),
+                        "scheme": None} for x in d]
+    except Exception:
+        CUSTOM_APPS = []
+
+
+_load_custom_apps()
+
+
+def hand_applist(text=""):
+    """รายชื่อแอปที่ติดตั้งในเครื่อง (package name) — เอาไปเพิ่มเป็นปุ่มด้วย /addapp"""
+    try:
+        r = subprocess.run(["pm", "list", "packages", "-3"],
+                           capture_output=True, timeout=30)
+        lines = sorted(l.strip().replace("package:", "")
+                       for l in r.stdout.decode(errors="ignore").splitlines() if l.strip())
+    except Exception as e:
+        return f"❌ อ่านรายชื่อแอปไม่ได้: {str(e)[:80]}"
+    if not lines:
+        return "ไม่เจอแอปภายนอกในเครื่องครับ"
+    body = "\n".join(lines)
+    return ("📲 แอปที่ติดตั้งในเครื่อง (ชื่อ package) — ก๊อปบรรทัดที่ต้องการ "
+            "แล้วพิมพ์ **/addapp** เพิ่มเป็นปุ่มได้เลย:\n```text\n" + body[:1800] + "\n```")
+
+
+HANDS["applist"] = hand_applist
 
 
 def find_app(text):
     t = (text or "").lower()
     best = None
-    for a in APPS:
+    for a in list(APPS) + list(CUSTOM_APPS):
         for n in a["names"]:
             if n in t:
                 best = a
@@ -2003,22 +2052,30 @@ def hand_open_app(text=""):
     app = find_app(t)
     if not app:
         return ("ไม่รู้จักแอปนี้ครับ — พิมพ์ **/apps** ดูรายชื่อแอปที่เปิดได้ "
-                "(หรือพิมพ์ เปิด + ชื่อแอปที่อยู่ในลิสต์)")
-    try:
-        r = subprocess.run(["termux-open", app["scheme"]],
-                           capture_output=True, timeout=15)
-        if r.returncode == 0:
-            return f"📲 เปิด {app['label']} แล้วครับ"
-    except Exception:
-        pass
-    try:
-        r = subprocess.run(
-            ["monkey", "-p", app["pkg"], "-c", "android.intent.category.LAUNCHER", "1"],
-            capture_output=True, timeout=15)
-        if r.returncode == 0:
-            return f"📲 เปิด {app['label']} แล้วครับ"
-    except Exception:
-        pass
+                "(หรือพิมพ์ **รายชื่อแอปในเครื่อง** เพื่อเพิ่มแอปอื่นเป็นปุ่ม)")
+    pkgs = list(app.get("pkgs") or [])
+    if app.get("pkg"):
+        pkgs.insert(0, app["pkg"])
+    if app.get("scheme"):
+        try:
+            r = subprocess.run(["termux-open", app["scheme"]],
+                               capture_output=True, timeout=15)
+            if r.returncode == 0:
+                return f"📲 เปิด {app['label']} แล้วครับ"
+        except Exception:
+            pass
+    for p in pkgs:
+        try:
+            chk = subprocess.run(["pm", "path", p], capture_output=True, timeout=15)
+            if chk.returncode != 0:
+                continue   # แอปนี้ไม่ได้ติดตั้ง — ลองตัวถัดไป
+            r = subprocess.run(
+                ["monkey", "-p", p, "-c", "android.intent.category.LAUNCHER", "1"],
+                capture_output=True, timeout=15)
+            if r.returncode == 0:
+                return f"📲 เปิด {app['label']} แล้วครับ"
+        except Exception:
+            continue
     return (f"❌ เปิด {app['label']} ไม่สำเร็จ — บางเครื่องบล็อกการเปิดแอปข้ามแอปตอน "
             f"Termux อยู่หลังบ้าน ลองเปิดหน้า Termux ค้างไว้แล้วสั่งใหม่ครับ "
             f"(หรือใช้ปุ่ม MacroDroid ตาม SETUP_DISCORD.md)")
@@ -2041,6 +2098,56 @@ class AppsPanel(discord.ui.View):
         super().__init__(timeout=300)
         for a in APPS[:15]:
             self.add_item(AppBtn(a))
+        for a in CUSTOM_APPS[:8]:
+            self.add_item(AppBtn(a))
+
+
+class AddAppModal(discord.ui.Modal, title="📲 เพิ่มแอปเป็นปุ่ม"):
+    pkg = discord.ui.TextInput(
+        label="package ของแอป (ก๊อปจากรายชื่อแอปในเครื่อง)",
+        placeholder="เช่น com.jeyluta.timestampcamerafree", max_length=80)
+    label = discord.ui.TextInput(label="ชื่อปุ่มที่จะโชว์",
+                                 placeholder="เช่น 🕘 รูปงาน Timestamp", max_length=40)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        p = str(self.pkg.value).strip()
+        lab = str(self.label.value).strip() or p
+        if not re.fullmatch(r"[A-Za-z0-9._]+", p):
+            await interaction.response.send_message(
+                "❌ รูปแบบ package ไม่ถูก (ต้องเป็นแบบ com.ชื่อ.แอป) — ก๊อปจาก "
+                "**รายชื่อแอปในเครื่อง** มาเลยครับ", ephemeral=True)
+            return
+        try:
+            chk = await asyncio.to_thread(
+                subprocess.run, ["pm", "path", p], capture_output=True, timeout=15)
+            if chk.returncode != 0:
+                await interaction.response.send_message(
+                    f"❌ ไม่เจอแอป `{p}` ในเครื่องนี้ — เช็คตัวสะกดจาก "
+                    "**รายชื่อแอปในเครื่อง** อีกครั้งครับ", ephemeral=True)
+                return
+        except Exception as e:
+            await interaction.response.send_message(
+                f"❌ เช็คแอปไม่สำเร็จ: {str(e)[:80]}", ephemeral=True)
+            return
+        data = []
+        try:
+            with open(CUSTOM_APPS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = []
+        data = [x for x in data if x.get("pkg") != p]
+        data.append({"pkg": p, "label": lab})
+        with open(CUSTOM_APPS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        _load_custom_apps()
+        await interaction.response.send_message(
+            f"📲 เพิ่ม **{lab}** เป็นปุ่มแล้วครับ! เปิดได้ที่ **/apps** "
+            f"หรือพิมพ์ เปิด{lab} ในแชต", ephemeral=True)
+
+
+@tree.command(name="addapp", description="📲 เพิ่มแอปในเครื่องเป็นปุ่ม (package จากรายชื่อแอป)")
+async def slash_addapp(interaction: discord.Interaction):
+    await interaction.response.send_modal(AddAppModal())
 
 
 @tree.command(name="apps", description="📲 แตะปุ่มเปิดแอปบนมือถือนี้เลย")
@@ -2505,7 +2612,8 @@ async def slash_help(interaction: discord.Interaction):
         "• เปิดแอปมือถือ: พิมพ์ เปิดไลน์/เปิดเฟส/เปิดติ๊กต็อก หรือแตะปุ่มใน /apps\n"
         "• อัตโนมัติ: สรุปเช้า 07:00 • รายงานเย็น 18:00 • เตือนงานก่อนเริ่ม • เตือนแบต — คุมที่ /auto\n"
         "• ความสว่างจอ/เสียง/จับเวลา/คิดเลข/เช็คเน็ต/หาเบอร์ในเครื่อง + /customers สมุดลูกค้า\n"
-        "• สั่งกำกวมเมื่อไหร่ บอทจะโชว์ปุ่มให้กดเลือกทันที 🎛️\n\n"
+        "• สั่งกำกวมเมื่อไหร่ บอทจะโชว์ปุ่มให้กดเลือกทันที 🎛️\n"
+        "• รูปงาน Timestamp: พิมพ์ รูปงาน / เพิ่มแอปอื่นเป็นปุ่มด้วย /addapp\n\n"
         "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /apps /customers /job /note /report /auto /setkey /update /help",
         ephemeral=True)
 
