@@ -1,0 +1,241 @@
+{
+  "name": "Jarvis AI — Discord Interactions",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Jarvis AI ตอบคุยผ่าน Discord\n\nตั้งค่า 2 จุดก่อนใช้งาน:\n1. Node **Groq AI** → แก้ Authorization เป็น `Bearer gsk_ใส่คุณ`\n2. Node **Send to Discord** → แก้ Authorization เป็น `Bot ใส่TokenDiscord`\n\nจากนั้น Activate → เอา Production Webhook URL ไปวางใน\nDiscord Developer Portal → General Information → Interactions Endpoint URL",
+        "height": 260,
+        "width": 360,
+        "color": 4
+      },
+      "id": "sticky-note-1",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [180, 40]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "jarvis-discord",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-node",
+      "name": "Discord Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "webhookId": "a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+      "position": [220, 320]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// แยกข้อมูลจาก Discord Interaction\nfor (const item of $input.all()) {\n  const body = item.json.body || item.json;\n  const data = body.data || {};\n  const isPing = body.type === 1;\n  // /ask แบบ slash command: ตัวเลือกชื่อ 'message'\n  let userText = '';\n  if (Array.isArray(data.options) && data.options.length) {\n    userText = data.options[0].value || '';\n  } else if (data.content) {\n    userText = data.content;\n  }\n  item.json = {\n    is_ping: isPing,\n    user_text: userText || 'สวัสดี',\n    interaction_token: body.token,\n    application_id: body.application_id,\n    channel_id: (data.channel_id || body.channel_id || '').toString(),\n    system_prompt: 'คุณคือ Jarvis AI ผู้ช่วยส่วนตัว ตอบภาษาไทยเป็นกันเอง เข้าใจง่าย สุภาพ ลงท้ายด้วยคำว่า ครับ ทุกประโยค ห้ามใช้คำว่า ค่ะ หรือ คะ ตอบสั้น กระชับ'\n  };\n}\nreturn $input.all();"
+      },
+      "id": "parse-node",
+      "name": "Parse interaction",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 320]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.is_ping }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-ping-node",
+      "name": "Is PING?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 320]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"type\": 1}"
+      },
+      "id": "respond-ping-node",
+      "name": "Reply PING",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [880, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"type\": 5, \"data\": {\"content\": \"กำลังคิดคำตอบครับ...\"}}"
+      },
+      "id": "respond-defer-node",
+      "name": "Reply thinking...",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [880, 440]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer ใส่_GROQ_API_KEY_ตรงนี้"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.1-8b-instant\",\n  \"temperature\": 0.7,\n  \"messages\": [\n    {\"role\": \"system\", \"content\": {{ JSON.stringify($json.system_prompt) }} },\n    {\"role\": \"user\", \"content\": {{ JSON.stringify($json.user_text) }} }\n  ]\n}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "groq-node",
+      "name": "Groq AI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 440]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const p = $('Parse interaction').first().json;\nlet reply = 'ขออภัยครับ ระบบ AI ขัดข้องครับ';\ntry {\n  reply = $json.choices[0].message.content || reply;\n} catch (e) {}\n// ล้างคำหลุดเหมือนระบบเดิม\nreply = reply.replace(/ค่ะ/g, 'ครับ').replace(/คะ/g, 'ครับ');\nreturn [{ json: { reply: reply.trim(), interaction_token: p.interaction_token, application_id: p.application_id } }];"
+      },
+      "id": "build-reply-node",
+      "name": "Build reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 440]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://discord.com/api/v10/webhooks/{{ $json.application_id }}/{{ $json.interaction_token }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"content\": {{ JSON.stringify($json.reply) }} }",
+        "options": {}
+      },
+      "id": "send-discord-node",
+      "name": "Send to Discord",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, 440]
+    }
+  ],
+  "connections": {
+    "Discord Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse interaction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse interaction": {
+      "main": [
+        [
+          {
+            "node": "Is PING?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is PING?": {
+      "main": [
+        [
+          {
+            "node": "Reply PING",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply thinking...",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply thinking...": {
+      "main": [
+        [
+          {
+            "node": "Groq AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq AI": {
+      "main": [
+        [
+          {
+            "node": "Build reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build reply": {
+      "main": [
+        [
+          {
+            "node": "Send to Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "meta": {
+    "instanceId": "jarvis-discord-workflow"
+  }
+}
