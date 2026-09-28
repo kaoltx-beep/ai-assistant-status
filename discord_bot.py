@@ -763,6 +763,359 @@ async def slash_weather(interaction: discord.Interaction, เมือง: str =
     await interaction.followup.send(out[:1900])
 
 
+# ============================================================
+# 🧰 ระบบงานแบบปุ่ม — เข้าด้วย /job เท่านั้น (แยกจากแชต 100%)
+#    เก็บใน jobs.db ข้างสคริปต์ (ห้ามลบไฟล์นี้!)
+# ============================================================
+import json as _json
+import sqlite3 as _sqlite3
+from datetime import datetime as _dt
+
+JOBS_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs.db")
+
+
+def _jobs_conn():
+    conn = _sqlite3.connect(JOBS_DB)
+    conn.execute("""CREATE TABLE IF NOT EXISTS jobs(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer TEXT DEFAULT '', jtype TEXT DEFAULT '',
+        address TEXT DEFAULT '', phone TEXT DEFAULT '', circuit TEXT DEFAULT '',
+        start_len REAL, end_len REAL, total_len REAL,
+        status TEXT DEFAULT 'open',
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        closed_at TEXT,
+        extra TEXT DEFAULT '{}')""")
+    return conn
+
+
+def _now_local():
+    return _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _to_num(s):
+    if s is None:
+        return None
+    s = str(s).strip().replace(",", "")
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _parse_job_text(text):
+    """แยกข้อความงานรูปแบบของทาง (ก๊อปมาวางทั้งก้อนได้เลย)"""
+    data = {"customer": "", "jtype": "", "address": "", "phone": "", "circuit": "",
+            "start_len": None, "end_len": None, "total_len": None, "extra": {}}
+    m = re.search(r"^\s*\d+\.\s*(.+?)(?:\s*\(([^)]*)\))?\s*[—–-]+\s*(.+)$",
+                  text, re.M)
+    if m:
+        data["customer"] = m.group(1).strip()
+        if m.group(2):
+            data["extra"]["เวลา"] = m.group(2).strip()
+        data["jtype"] = m.group(3).strip()
+    keymap = {"ที่อยู่": "address", "เบอร์โทร": "phone", "circuit": "circuit",
+              "ระยะสายเริ่มต้น": "start_len", "ระยะสายสิ้นสุด": "end_len",
+              "ระยะสายรวมทั้งหมด": "total_len"}
+    for km in re.finditer(r"^[ \t]*\*[ \t]*([^:\n]+?)[ \t]*:[ \t]*(.*)$", text, re.M):
+        k = km.group(1).strip()
+        v = km.group(2).strip()
+        tgt = keymap.get(k.lower())
+        if tgt and tgt.endswith("_len"):
+            num = _to_num(v)
+            if num is not None:
+                data[tgt] = num
+        elif tgt:
+            data[tgt] = v or data[tgt]
+        elif v:
+            data["extra"][k] = v
+    if not data["customer"]:
+        first = next((l.strip() for l in text.splitlines() if l.strip()), "")
+        data["customer"] = re.sub(r"^\d+\.\s*", "", first)[:80]
+    return data
+
+
+_JOB_COLS = ("id,customer,jtype,address,phone,circuit,start_len,end_len,"
+             "total_len,status,created_at,closed_at,extra")
+
+
+def _job_row(r):
+    d = dict(zip(_JOB_COLS.split(","), r))
+    try:
+        d["extra"] = _json.loads(d.get("extra") or "{}")
+    except Exception:
+        d["extra"] = {}
+    return d
+
+
+def _jobs_add(d):
+    conn = _jobs_conn()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO jobs(customer,jtype,address,phone,circuit,"
+                "start_len,end_len,total_len,extra) VALUES(?,?,?,?,?,?,?,?,?)",
+                (d.get("customer", ""), d.get("jtype", ""), d.get("address", ""),
+                 d.get("phone", ""), d.get("circuit", ""), d.get("start_len"),
+                 d.get("end_len"), d.get("total_len"),
+                 _json.dumps(d.get("extra", {}), ensure_ascii=False)))
+    conn.commit()
+    jid = cur.lastrowid
+    conn.close()
+    return jid
+
+
+def _jobs_get(jid):
+    cur = _jobs_conn().execute(
+        f"SELECT {_JOB_COLS} FROM jobs WHERE id=?", (jid,))
+    r = cur.fetchone()
+    cur.close()
+    return _job_row(r) if r else None
+
+
+def _jobs_open(limit=25):
+    cur = _jobs_conn().execute(
+        f"SELECT {_JOB_COLS} FROM jobs WHERE status='open' ORDER BY id DESC LIMIT ?",
+        (limit,))
+    rows = [_job_row(r) for r in cur.fetchall()]
+    cur.close()
+    return rows
+
+
+def _jobs_update(jid, **f):
+    if not f:
+        return
+    cols = ",".join(f"{k}=?" for k in f)
+    conn = _jobs_conn()
+    conn.execute(f"UPDATE jobs SET {cols} WHERE id=?", (*f.values(), jid))
+    conn.commit()
+    conn.close()
+
+
+def _jobs_delete(jid):
+    conn = _jobs_conn()
+    conn.execute("DELETE FROM jobs WHERE id=?", (jid,))
+    conn.commit()
+    conn.close()
+
+
+def _jobs_today():
+    cur = _jobs_conn().execute(
+        "SELECT COUNT(*), COALESCE(SUM(total_len),0) FROM jobs "
+        "WHERE status='closed' AND date(closed_at)=date('now','localtime')")
+    n, meters = cur.fetchone()
+    cur.close()
+    return n or 0, meters or 0
+
+
+_EXTRA_ORDER = ["เวลา", "LOID", "Port L2", "L", "กล่องเราเตอร์", "Mesh",
+                "True ID", "กล้อง", "ใช้สายเดิมสายใหม่", "การเก็บเงิน", "เลขดั้ม"]
+
+
+def _fmt_len(v):
+    return "-" if v is None else f"{v:g}"
+
+
+def _job_card(j):
+    icon = "🔓" if j["status"] == "open" else "✅"
+    lines = [f"{icon} #{j['id']} • {(j['customer'] or '(ไม่มีชื่อ)').replace(chr(10), ' ')}"]
+    if j["jtype"]:
+        lines.append(f"งาน: {j['jtype']}")
+    if j["address"]:
+        lines.append(f"ที่อยู่: {j['address']}".replace(chr(10), " / "))
+    if j["circuit"]:
+        lines.append(f"Circuit: {j['circuit']}")
+    if j["phone"]:
+        lines.append(f"โทร: {j['phone']}")
+    lines.append(f"ระยะสาย: เริ่ม {_fmt_len(j['start_len'])} • "
+                 f"สิ้นสุด {_fmt_len(j['end_len'])} • รวม {_fmt_len(j['total_len'])}")
+    ex = j.get("extra") or {}
+    for k in _EXTRA_ORDER:
+        if ex.get(k):
+            lines.append(f"{k}: {ex[k]}")
+    for k, v in ex.items():
+        if k not in _EXTRA_ORDER and v:
+            lines.append(f"{k}: {v}")
+    return "\n".join(lines)
+
+
+class JobAddModal(discord.ui.Modal, title="🧰 เปิดงานใหม่"):
+    customer = discord.ui.TextInput(label="ชื่อลูกค้า", placeholder="เช่น คุณสมชาย ใจดี",
+                                    max_length=80)
+    jtype = discord.ui.TextInput(label="ประเภทงาน",
+                                 placeholder="เช่น FIBERTV, HSI/New Connection",
+                                 required=False, max_length=80)
+    address = discord.ui.TextInput(label="ที่อยู่", style=discord.TextStyle.paragraph,
+                                   required=False, max_length=300)
+    phone = discord.ui.TextInput(label="เบอร์โทร", required=False, max_length=30)
+    circuit = discord.ui.TextInput(label="Circuit", required=False, max_length=80)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        jid = _jobs_add({"customer": str(self.customer.value).strip(),
+                         "jtype": str(self.jtype.value).strip(),
+                         "address": str(self.address.value).strip(),
+                         "phone": str(self.phone.value).strip(),
+                         "circuit": str(self.circuit.value).strip()})
+        await interaction.response.send_message(
+            f"🧰 เปิดงาน #{jid} แล้วครับ\n```{_job_card(_jobs_get(jid))}```",
+            ephemeral=True)
+
+
+class JobPasteModal(discord.ui.Modal, title="📥 วางข้อความงาน (ก๊อปมาทั้งก้อน)"):
+    blob = discord.ui.TextInput(label="ข้อความงาน", style=discord.TextStyle.paragraph,
+                                placeholder="วางรายละเอียดงานที่ก๊อปมาจากระบบทางได้เลยครับ",
+                                max_length=1800)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        d = _parse_job_text(str(self.blob.value))
+        jid = _jobs_add(d)
+        await interaction.response.send_message(
+            f"📥 เปิดงาน #{jid} จากข้อความที่วางแล้วครับ\n```{_job_card(_jobs_get(jid))}```",
+            ephemeral=True)
+
+
+class JobLenModal(discord.ui.Modal, title="📏 อัปเดตระยะสาย"):
+    start_f = discord.ui.TextInput(label="ระยะสายเริ่มต้น", placeholder="เช่น 1002",
+                                   max_length=15)
+    end_f = discord.ui.TextInput(label="ระยะสายสิ้นสุด (ยังไม่มีปล่อยว่าง)",
+                                 required=False, max_length=15)
+
+    def __init__(self, jid):
+        super().__init__()
+        self.jid = jid
+        j = _jobs_get(jid) or {}
+        if j.get("start_len") is not None:
+            self.start_f.default = f"{j['start_len']:g}"
+        if j.get("end_len") is not None:
+            self.end_f.default = f"{j['end_len']:g}"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        s, e = _to_num(self.start_f.value), _to_num(self.end_f.value)
+        tot = round(e - s, 1) if (s is not None and e is not None) else None
+        _jobs_update(self.jid, start_len=s, end_len=e, total_len=tot)
+        await interaction.response.send_message(
+            f"📏 บันทึกระยะสายงาน #{self.jid} แล้วครับ\n```{_job_card(_jobs_get(self.jid))}```",
+            ephemeral=True)
+
+
+class _ConfirmDelete(discord.ui.View):
+    def __init__(self, jid):
+        super().__init__(timeout=60)
+        self.jid = jid
+
+    @discord.ui.button(label="ยืนยันลบ", style=discord.ButtonStyle.danger, emoji="🗑️")
+    async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        _jobs_delete(self.jid)
+        await interaction.response.edit_message(
+            content=f"🗑️ ลบงาน #{self.jid} แล้วครับ", view=None)
+
+    @discord.ui.button(label="ยกเลิก", style=discord.ButtonStyle.secondary)
+    async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="ยกเลิกการลบแล้วครับ", view=None)
+
+
+class _JobSelect(discord.ui.Select):
+    def __init__(self, mode):
+        self.mode = mode
+        jobs = _jobs_open()
+        ph = {"len": "เลือกงานที่จะบันทึกระยะสาย",
+              "close": "เลือกงานที่จะปิด",
+              "delete": "เลือกงานที่จะลบ"}[mode]
+        opts = [discord.SelectOption(label=f"#{j['id']} {(j['customer'] or '')[:60]}",
+                                     value=str(j["id"])) for j in jobs[:25]]
+        super().__init__(placeholder=ph, options=opts)
+
+    async def callback(self, interaction: discord.Interaction):
+        jid = int(self.values[0])
+        if self.mode == "len":
+            await interaction.response.send_modal(JobLenModal(jid))
+        elif self.mode == "close":
+            _jobs_update(jid, status="closed", closed_at=_now_local())
+            j = _jobs_get(jid)
+            n, meters = _jobs_today()
+            sumline = f"\nวันนี้ปิดแล้ว {n} งาน" + (f" • สายรวม {meters:g} ม." if meters else "")
+            await interaction.response.edit_message(
+                content=f"✅ ปิดงาน #{jid} เรียบร้อย\n```{_job_card(j)}```{sumline}",
+                view=None)
+        else:
+            await interaction.response.edit_message(
+                content=f"จะลบงาน #{jid} — กดปุ่มยืนยันลบเพื่อลบเลยครับ",
+                view=_ConfirmDelete(jid))
+
+
+class _JobPickView(discord.ui.View):
+    def __init__(self, mode):
+        super().__init__(timeout=180)
+        self.add_item(_JobSelect(mode))
+
+
+class JobPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=600)
+
+    @discord.ui.button(label="เปิดงานใหม่", emoji="➕",
+                       style=discord.ButtonStyle.success, row=0)
+    async def add(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(JobAddModal())
+
+    @discord.ui.button(label="วางข้อความงาน", emoji="📥",
+                       style=discord.ButtonStyle.primary, row=0)
+    async def paste(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(JobPasteModal())
+
+    @discord.ui.button(label="ระยะสาย", emoji="📏",
+                       style=discord.ButtonStyle.secondary, row=0)
+    async def lens(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _jobs_open():
+            await interaction.response.send_message(
+                "ยังไม่มีงานเปิดอยู่ครับ — เริ่มด้วย ➕ เปิดงานใหม่ หรือ 📥 วางข้อความงาน",
+                ephemeral=True)
+            return
+        await interaction.response.send_message(view=_JobPickView("len"), ephemeral=True)
+
+    @discord.ui.button(label="ปิดงาน", emoji="✅",
+                       style=discord.ButtonStyle.secondary, row=1)
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _jobs_open():
+            await interaction.response.send_message(
+                "ยังไม่มีงานเปิดอยู่ครับ", ephemeral=True)
+            return
+        await interaction.response.send_message(view=_JobPickView("close"), ephemeral=True)
+
+    @discord.ui.button(label="ลบงาน", emoji="🗑️",
+                       style=discord.ButtonStyle.danger, row=1)
+    async def delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _jobs_open():
+            await interaction.response.send_message(
+                "ยังไม่มีงานเปิดอยู่ครับ", ephemeral=True)
+            return
+        await interaction.response.send_message(view=_JobPickView("delete"), ephemeral=True)
+
+    @discord.ui.button(label="ดูงานทั้งหมด", emoji="📋",
+                       style=discord.ButtonStyle.secondary, row=1)
+    async def viewall(self, interaction: discord.Interaction, button: discord.ui.Button):
+        jobs = _jobs_open()
+        if not jobs:
+            await interaction.response.send_message(
+                "📋 ยังไม่มีงานเปิดอยู่ครับ", ephemeral=True)
+            return
+        body = "\n\n".join(_job_card(j) for j in jobs)
+        await interaction.response.send_message(
+            f"📋 **งานที่กำลังทำ ({len(jobs)})**\n```\n{body[:1800]}\n```",
+            ephemeral=True)
+
+
+@tree.command(name="job", description="🧰 ระบบงานแบบปุ่ม (แยกจากแชต)")
+async def slash_job(interaction: discord.Interaction):
+    jobs = _jobs_open()
+    n_done, meters = _jobs_today()
+    desc = f"🔓 กำลังทำ {len(jobs)} งาน • ✅ วันนี้ปิดแล้ว {n_done} งาน"
+    if meters:
+        desc += f" • สายรวม {meters:g} ม."
+    desc += "\n\nกดปุ่มด้านล่างจัดการได้เลยครับ"
+    await interaction.response.send_message(f"🧰 **ระบบงาน** — {desc}",
+                                            view=JobPanel(), ephemeral=True)
+
+
 @tree.command(name="help", description="📖 ดูความสามารถทั้งหมดของ Jarvis")
 async def slash_help(interaction: discord.Interaction):
     hands = "\n".join(f"• `{k}`" for k in sorted(HANDS)) or "(โหมดคุยอย่างเดียว)"
@@ -776,8 +1129,9 @@ async def slash_help(interaction: discord.Interaction):
         "• จดรายจ่าย น้ำมัน 500 / สรุปรายจ่ายเดือนนี้\n"
         "• อากาศเชียงใหม่ / ดอลลาร์วันนี้เท่าไหร่ / ทอยเต๋า 2 ดอก\n"
         "• เปิดไฟฉาย / ปิดไฟฉาย / ถ่ายรูปเซลฟี่ / ฉันอยู่ที่ไหน\n"
-        "• เปิดเสียง / ปิดเสียง (พูด + ส่ง voice note)\n\n"
-        "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /help",
+        "• เปิดเสียง / ปิดเสียง (พูด + ส่ง voice note)\n"
+        "• ระบบงาน: พิมพ์ /job แล้วกดปุ่ม (แยกจากแชต 100%)\n\n"
+        "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /job /help",
         ephemeral=True)
 
 
