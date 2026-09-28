@@ -62,6 +62,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("jarvis-discord")
 
 import discord
+from discord import app_commands
 from groq import Groq
 
 groq_client = Groq(api_key=GROQ_API_KEY)
@@ -125,7 +126,7 @@ intents = discord.Intents.default()
 intents.message_content = True  # ⚠️ ต้องเปิดใน Developer Portal ด้วย (ดู SETUP_DISCORD.md ขั้นที่ 3)
 
 bot = discord.Client(intents=intents)
-tree = bot.tree
+tree = app_commands.CommandTree(bot)
 
 
 @tree.command(name="ask", description="ถาม Jarvis AI")
