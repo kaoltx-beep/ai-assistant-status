@@ -43,7 +43,7 @@ def _get(name, fallback=None):
 
 DISCORD_BOT_TOKEN = _get("DISCORD_BOT_TOKEN")
 GROQ_API_KEY = _get("GROQ_API_KEY")
-GROQ_MODEL = _get("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_MODEL = _get("GROQ_MODEL")  # ไม่ต้องตั้งก็ได้ — บอทเลือกโมเดลที่ยังมีอยู่ให้เอง
 MAX_TURNS = 5  # จำคอยสนทนาย้อนหลัง 5 รอบต่อแชนเนล
 
 if not DISCORD_BOT_TOKEN or "here" in str(DISCORD_BOT_TOKEN) or "ใส่" in str(DISCORD_BOT_TOKEN):
@@ -68,6 +68,39 @@ from groq import Groq
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 # ------------------
+# เลือกโมเดลอัตโนมัติ (กันโมเดลถูกปลดจาก Groq — ปัญหา 404 model_not_found)
+# ------------------
+PREFERRED_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+BAD_MODEL_KEYWORDS = ("whisper", "tts", "guard", "embed", "playai")
+
+_current_model = None
+
+
+def pick_model():
+    """ถาม Groq ว่าตอนนี้มีโมเดลอะไรยังใช้ได้ แล้วเลือกอันที่ดีที่สุด"""
+    if GROQ_MODEL:  # ผู้ใช้ตั้งเอง → ใช้อันนั้น
+        return GROQ_MODEL
+    try:
+        ids = [m.id for m in groq_client.models.list()]
+        good = [i for i in ids if not any(k in i.lower() for k in BAD_MODEL_KEYWORDS)]
+        for p in PREFERRED_MODELS:
+            if p in good:
+                return p
+        if good:
+            return good[0]
+    except Exception as e:
+        log.warning("เช็ครายชื่อโมเดลไม่สำเร็จ (%s) — ใช้ชื่อมาตรฐานแทน", e)
+    return PREFERRED_MODELS[0]
+
+
+def get_model():
+    global _current_model
+    if _current_model is None:
+        _current_model = pick_model()
+        log.info("ใช้โมเดล Groq: %s", _current_model)
+    return _current_model
+
+# ------------------
 # ความจำรายแชนเนล: channel_id -> deque ของ {"role","content"}
 # ------------------
 memories = {}
@@ -78,12 +111,23 @@ def ask_jarvis_sync(user_text, history):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + list(history) + [
         {"role": "user", "content": user_text}
     ]
-    res = groq_client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=messages,
-        temperature=0.7,
-    )
-    return (res.choices[0].message.content or "").strip()
+    global _current_model
+    for attempt in (1, 2):  # ครั้งแรกพลาดเพราะโมเดลถูกปลด → เลือกใหม่แล้วลองอีกครั้ง
+        try:
+            res = groq_client.chat.completions.create(
+                model=get_model(),
+                messages=messages,
+                temperature=0.7,
+            )
+            return (res.choices[0].message.content or "").strip()
+        except Exception as e:
+            msg = str(e).lower()
+            if attempt == 1 and ("model_not_found" in msg or "does not exist" in msg):
+                log.warning("โมเดล %s ใช้ไม่ได้แล้ว — เลือกโมเดลใหม่ให้อัตโนมัติ", _current_model)
+                _current_model = None
+                continue
+            raise
+    return "ขออภัยครับ ระบบ AI ขัดข้องครับ"
 
 
 SYSTEM_PROMPT = """คุณคือ Jarvis AI ผู้ช่วยส่วนตัว ทำงานผ่าน Discord
