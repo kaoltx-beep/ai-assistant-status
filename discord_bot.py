@@ -51,6 +51,7 @@ def _get(name, fallback=None):
 DISCORD_BOT_TOKEN = _get("DISCORD_BOT_TOKEN")
 GROQ_API_KEY = _get("GROQ_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()  # ตาทางเลือก B (ไม่มีก็ได้)
+SHEET_WEBHOOK_URL = os.environ.get("SHEET_WEBHOOK_URL", "").strip()  # Google Sheet (ไม่มีก็ได้)
 GROQ_MODEL = _get("GROQ_MODEL")  # ไม่ต้องตั้ง — บอทเลือกโมเดลที่ยังมีชีวิตให้เอง
 MAX_TURNS = 5
 
@@ -459,6 +460,7 @@ SYSTEM_PROMPT = """คุณคือ Jarvis AI ผู้ช่วยส่ว�
 - "random"        : ทอยเต๋า/สุ่มเลข/เหี่ยวหัวก้อย — action_text เช่น "ทอยเต๋า 2 ดอก" หรือ "สุ่มเลข 1 ถึง 100"
 - "torch"         : เปิด/ปิดไฟฉาย — action_text "on" หรือ "off"
 - "camera"        : ถ่ายรูปจากมือถือส่งเข้าแชต — action_text "back" (หลัง) หรือ "front" (หน้า)
+- "sheet_push"    : ส่งข้อมูลเข้า Google Sheet — action_text "งาน" หรือ "ลูกค้า"
 - "daily_report"  : สรุปงานวันนี้/รายงานงาน — สรุปงานที่ปิดวันนี้ ระยะสายรวม และงานค้าง
 - "brightness"     : ปรับความสว่างจอ — action_text เช่น "สว่างสุด", "หรี่จอ", "50%"
 - "volume"         : ปรับเสียงเครื่อง — action_text เช่น "เสียงดังสุด", "ลดเสียง", "ปิดเสียงเรียกเข้า" (ห้ามใช้กับระบบเสียงพูดของบอท)
@@ -563,6 +565,9 @@ def fallback_intent(text):
         return "net", text
     if "แบต" in t or "battery" in t:
         return "check_battery", ""
+    if any(k in t for k in ("ชีต", "sheet", "ซิงค์", "ส่งงานเข้าสเปรด")) and len(t) < 60 \
+            and "เน็ต" not in t:
+        return "sheet_push", text
     if any(k in t for k in ("รูปงาน", "timestamp", "ไทม์สแตมป์", "ไทม์แสตมป์")):
         return "open_app", text
     if any(k in t for k in ("รายชื่อแอป", "แอปในเครื่อง", "แอปที่ติดตั้ง")):
@@ -1322,6 +1327,14 @@ def _jobs_get(jid):
     return _job_row(r) if r else None
 
 
+def _jobs_all(limit=500):
+    cur = _jobs_conn().execute(
+        f"SELECT {_JOB_COLS} FROM jobs ORDER BY id DESC LIMIT ?", (limit,))
+    rows = [_job_row(r) for r in cur.fetchall()]
+    cur.close()
+    return rows
+
+
 def _jobs_open(limit=25):
     cur = _jobs_conn().execute(
         f"SELECT {_JOB_COLS} FROM jobs WHERE status='open' ORDER BY id DESC LIMIT ?",
@@ -1482,6 +1495,16 @@ class _JobSelect(discord.ui.Select):
         elif self.mode == "close":
             _jobs_update(jid, status="closed", closed_at=_now_local())
             j = _jobs_get(jid)
+            if AUTO.get("sheet_autosync") and SHEET_WEBHOOK_URL:
+                try:
+                    await asyncio.to_thread(_sheet_payload, {
+                        "action": "append", "sheet": "งาน", "row": [
+                            j.get("id"), "ปิดแล้ว", j.get("customer"), j.get("jtype"),
+                            j.get("address"), j.get("phone"), j.get("circuit"),
+                            j.get("start_len"), j.get("end_len"), j.get("total_len"),
+                            j.get("created_at"), j.get("closed_at")]})
+                except Exception as e:
+                    log.warning("sheet autosync: %s", e)
             n, meters = _jobs_today()
             sumline = f"\nวันนี้ปิดแล้ว {n} งาน" + (f" • สายรวม {meters:g} ม." if meters else "")
             await interaction.response.edit_message(
@@ -1768,16 +1791,17 @@ def _cust_add(name, phone="", address="", note=""):
     return cid
 
 
-def _cust_search(q=""):
+def _cust_search(q="", limit=20):
     conn = _cust_conn()
     if q:
         cur = conn.execute(
             "SELECT id,name,phone,address,note FROM customers "
-            "WHERE name LIKE ? OR phone LIKE ? OR address LIKE ? ORDER BY id DESC LIMIT 20",
-            (f"%{q}%", f"%{q}%", f"%{q}%"))
+            "WHERE name LIKE ? OR phone LIKE ? OR address LIKE ? ORDER BY id DESC LIMIT ?",
+            (f"%{q}%", f"%{q}%", f"%{q}%", limit))
     else:
         cur = conn.execute(
-            "SELECT id,name,phone,address,note FROM customers ORDER BY id DESC LIMIT 20")
+            "SELECT id,name,phone,address,note FROM customers ORDER BY id DESC LIMIT ?",
+            (limit,))
     rows = cur.fetchall()
     cur.close()
     return rows
@@ -2168,7 +2192,7 @@ HANDS["open_app"] = hand_open_app
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "settings.json")
 AUTO = {"morning": True, "evening": True, "job_alert": True,
-        "battery_alert": True, "battery_level": 20}
+        "battery_alert": True, "battery_level": 20, "sheet_autosync": False}
 REPORT_HOUR = 18
 _JOB_ALERT_MIN = 15      # เตือนก่อนงานเริ่ม 15 นาที
 
@@ -2320,7 +2344,8 @@ async def evening_report_loop():
 
 
 _AUTO_LABELS = [("morning", "สรุปเช้า 07:00"), ("evening", "รายงานเย็น 18:00"),
-                ("job_alert", "เตือนงานล่วงหน้า"), ("battery_alert", "เตือนแบตต่ำ")]
+                ("job_alert", "เตือนงานล่วงหน้า"), ("battery_alert", "เตือนแบตต่ำ"),
+                ("sheet_autosync", "ปิดงาน -> ส่งเข้า Google Sheet")]
 
 
 def _auto_text():
@@ -2358,6 +2383,10 @@ class AutoPanel(discord.ui.View):
     async def b4(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._flip(interaction, "battery_alert")
 
+    @discord.ui.button(label="งาน→Sheet", emoji="📊")
+    async def b5(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._flip(interaction, "sheet_autosync")
+
 
 @tree.command(name="auto", description="🤖 เปิด/ปิดระบบอัตโนมัติทั้งหมด")
 async def slash_auto(interaction: discord.Interaction):
@@ -2370,6 +2399,219 @@ async def slash_report(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
     out = await asyncio.to_thread(report_text)
     await interaction.followup.send(out)
+
+
+# ============================================================
+# 📊 Google Sheet — ส่งงาน/ลูกค้าเข้าชีตผ่าน Apps Script webhook (ฟรี)
+#    ตั้งค่า: /sheet -> 🔗 ตั้งลิงก์ (โค้ดสคริปต์อยู่ในไฟล์ google-apps-script.gs)
+# ============================================================
+from urllib.request import Request as _SReq, urlopen as _Surlopen
+from urllib.parse import quote as _Squote
+
+
+def _env_upsert(key, value):
+    """บันทึก KEY=value ลง .env (แทนที่ถ้ามีอยู่แล้ว)"""
+    envp = None
+    for cand in (os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+                 os.path.join(os.getcwd(), ".env")):
+        if os.path.exists(cand):
+            envp = cand
+            break
+    envp = envp or os.path.join(os.getcwd(), ".env")
+    lines = []
+    try:
+        with open(envp, "r", encoding="utf-8") as f:
+            lines = [l for l in f.readlines()
+                     if not l.strip().startswith(key + "=")]
+    except Exception:
+        lines = []
+    lines.append(key + "=" + value + "\n")
+    with open(envp, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+    os.environ[key] = value
+
+
+def _sheet_payload(payload):
+    """ยิง payload ไปที่ Apps Script — POST ก่อน ถ้าพังสลับ GET (ทน redirect ทุกแบบ)"""
+    url = SHEET_WEBHOOK_URL
+    if not url:
+        raise RuntimeError("ยังไม่ได้ตั้งลิงก์ชีต")
+    raw = None
+    try:
+        req = _SReq(url, data=json.dumps(payload).encode(),
+                    headers={"Content-Type": "application/json"}, method="POST")
+        raw = _Surlopen(req, timeout=60).read().decode()
+    except Exception as e1:
+        try:
+            gurl = url + ("&" if "?" in url else "?") + "payload=" + _Squote(
+                json.dumps(payload))
+            raw = _Surlopen(gurl, timeout=60).read().decode()
+        except Exception as e2:
+            raise RuntimeError(
+                f"เชื่อมชีตไม่ได้ (POST: {str(e1)[:45]} / GET: {str(e2)[:45]})") from e2
+    try:
+        out = json.loads(raw)
+        if not isinstance(out, dict):
+            raise ValueError
+        return out
+    except Exception:
+        return {"ok": False, "msg": str(raw)[:100]}
+
+
+def sheet_append_job(j):
+    """ส่งงาน 1 งานเข้าแท็บ 'งาน' (ใช้กับ auto เมื่อปิดงาน)"""
+    return _sheet_payload({"action": "append", "sheet": "งาน", "row": [
+        j.get("id"), j.get("status"), j.get("customer"), j.get("jtype"),
+        j.get("address"), j.get("phone"), j.get("circuit"),
+        j.get("start_len"), j.get("end_len"), j.get("total_len"),
+        j.get("created_at"), j.get("closed_at")]})
+
+
+def sheet_sync_jobs():
+    jobs = _jobs_all(500)
+    head = ["#", "สถานะ", "ชื่อลูกค้า", "ประเภทงาน", "ที่อยู่", "เบอร์",
+            "Circuit", "ระยะเริ่ม", "ระยะสิ้นสุด", "ระยะรวม", "เปิดเมื่อ", "ปิดเมื่อ"]
+    rows = [[j.get("id"), "กำลังทำ" if j["status"] == "open" else "ปิดแล้ว",
+             j.get("customer"), j.get("jtype"), j.get("address"), j.get("phone"),
+             j.get("circuit"), j.get("start_len"), j.get("end_len"),
+             j.get("total_len"), j.get("created_at"), j.get("closed_at")]
+            for j in jobs]
+    return _sheet_payload({"action": "sync", "sheet": "งาน", "head": head,
+                           "rows": rows})
+
+
+def sheet_sync_customers():
+    cs = _cust_search(limit=500)
+    head = ["#", "ชื่อ", "เบอร์", "ที่อยู่", "โน้ต", "เพิ่มเมื่อ"]
+    rows = [[c[0], c[1], c[2], c[3], c[4], ""] for c in cs]
+    return _sheet_payload({"action": "sync", "sheet": "ลูกค้า", "head": head,
+                           "rows": rows})
+
+
+def hand_sheet(text=""):
+    if not SHEET_WEBHOOK_URL:
+        return ("ยังไม่ได้เชื่อม Google Sheet ครับ — พิมพ์ **/sheet** แล้วกด "
+                "**🔗 ตั้งลิงก์** (วิธีทำลิงก์มีใน /sheet เอง)")
+    try:
+        if "ลูกค้า" in text:
+            r = sheet_sync_customers()
+            ok, n = r.get("ok"), r.get("msg", "")
+            return (f"📊 ส่ง**สมุดลูกค้า**เข้าชีตแล้วครับ ({n})" if ok
+                    else f"❌ ชีตตอบกลับมาว่าพัง: {n}")
+        r = sheet_sync_jobs()
+        ok, n = r.get("ok"), r.get("msg", "")
+        return (f"📊 ส่ง**งานทั้งหมด**เข้าชีตแล้วครับ ({n})" if ok
+                else f"❌ ชีตตอบกลับมาว่าพัง: {n}")
+    except Exception as e:
+        return f"❌ เชื่อมชีตไม่สำเร็จ: {str(e)[:100]}"
+
+
+HANDS["sheet_push"] = hand_sheet
+
+
+class SheetURLModal(discord.ui.Modal, title="🔗 เชื่อม Google Sheet"):
+    url = discord.ui.TextInput(
+        label="Web app URL (ขึ้นต้น https://script.google.com/)",
+        placeholder="วางลิงก์ที่ได้ตอน Deploy ใน Apps Script", max_length=300)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        global SHEET_WEBHOOK_URL
+        u = str(self.url.value).strip()
+        if not u.startswith("https://script.google"):
+            await interaction.response.send_message(
+                "❌ ลิงก์ต้องขึ้นต้น https://script.google.com/... (Web app URL "
+                "ที่ได้ตอนกด Deploy) — เช็คอีกครั้งครับ", ephemeral=True)
+            return
+        _env_upsert("SHEET_WEBHOOK_URL", u)
+        SHEET_WEBHOOK_URL = u
+        os.environ["SHEET_WEBHOOK_URL"] = u
+        await interaction.response.send_message(
+            "🔗 เชื่อมชีตแล้วครับ! กด **🧪 ทดสอบ** ใน /sheet เพื่อยิงแถวทดสอบเข้าชีต "
+            "(ถ้าทดสอบผ่าน = ระบบพร้อมใช้)", ephemeral=True)
+
+
+class _SyncBtn(discord.ui.Button):
+    def __init__(self, label, kind):
+        super().__init__(label=label, style=discord.ButtonStyle.secondary)
+        self.kind = kind
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            if self.kind == "test":
+                r = await asyncio.to_thread(_sheet_payload, {"action": "ping"})
+                msg = ("🧪 ทดสอบสำเร็จ! เปิดชีตดูจะมีแท็บ **log** และแถว ping "
+                       "โผล่มาครับ" if r.get("ok")
+                       else f"❌ ชีตตอบว่าพัง: {r.get('msg', '')[:120]}")
+            elif self.kind == "jobs":
+                r = await asyncio.to_thread(sheet_sync_jobs)
+                msg = (f"📊 ส่งงานเข้าชีตแล้ว ({r.get('msg', '')})" if r.get("ok")
+                       else f"❌ พัง: {r.get('msg', '')[:120]}")
+            else:
+                r = await asyncio.to_thread(sheet_sync_customers)
+                msg = (f"📊 ส่งลูกค้าเข้าชีตแล้ว ({r.get('msg', '')})" if r.get("ok")
+                       else f"❌ พัง: {r.get('msg', '')[:120]}")
+        except Exception as e:
+            msg = f"❌ {str(e)[:140]}"
+        await interaction.followup.send(msg, ephemeral=True)
+
+
+class SheetPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=600)
+
+    @discord.ui.button(label="ตั้งลิงก์", emoji="🔗",
+                       style=discord.ButtonStyle.success)
+    async def setlink(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(SheetURLModal())
+
+    @discord.ui.button(label="ทดสอบ", emoji="🧪",
+                       style=discord.ButtonStyle.primary)
+    async def test(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not SHEET_WEBHOOK_URL:
+            await interaction.response.send_message(
+                "ยังไม่มีลิงก์ — กด 🔗 ตั้งลิงก์ก่อนครับ", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            r = await asyncio.to_thread(_sheet_payload, {"action": "ping"})
+            msg = ("🧪 ทดสอบสำเร็จ! เปิดชีตดูจะมีแท็บ **log** และแถว ping "
+                   "โผล่มาครับ" if r.get("ok")
+                   else f"❌ ชีตตอบว่าพัง: {r.get('msg', '')[:120]}")
+        except Exception as e:
+            msg = f"❌ {str(e)[:140]}"
+        await interaction.followup.send(msg, ephemeral=True)
+
+    @discord.ui.button(label="ส่งงาน", emoji="📤")
+    async def jobs(self, interaction: discord.Interaction, button: discord.ui.Button):
+        btn = _SyncBtn("ส่งงาน", "jobs")
+        await btn.callback(interaction)
+
+    @discord.ui.button(label="ส่งลูกค้า", emoji="📤")
+    async def custs(self, interaction: discord.Interaction, button: discord.ui.Button):
+        btn = _SyncBtn("ส่งลูกค้า", "customers")
+        await btn.callback(interaction)
+
+    @discord.ui.button(label="อัตโนมัติเมื่อปิดงาน", emoji="🔁")
+    async def autotoggle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        AUTO["sheet_autosync"] = not AUTO.get("sheet_autosync", False)
+        _save_auto()
+        await interaction.response.send_message(
+            ("✅ เปิดแล้วครับ — ทุกครั้งที่**ปิดงาน**ใน /job จะส่งแถวงานเข้าชีตเอง"
+             if AUTO["sheet_autosync"] else "⬜ ปิดส่งอัตโนมัติแล้วครับ"),
+            ephemeral=True)
+
+
+@tree.command(name="sheet", description="📊 เชื่อม/ส่งข้อมูลเข้า Google Sheet")
+async def slash_sheet(interaction: discord.Interaction):
+    st = ("🔗 ลิงก์: ตั้งแล้ว ✅" if SHEET_WEBHOOK_URL
+          else "🔗 ลิงก์: ยังไม่ได้ตั้ง ⬜")
+    st += f"\n🔁 ส่งอัตโนมัติเมื่อปิดงาน: {'เปิด ✅' if AUTO.get('sheet_autosync') else 'ปิด ⬜'}"
+    st += "\n\nวิธีสร้างลิงก์: สร้าง Google Sheet → script.google.com วางโค้ด "
+    st += "google-apps-script.gs (แก้ SHEET_ID จากลิงก์ชีต) → Deploy เป็น Web app "
+    st += "(Anyone) → ก๊อป URL มากด 🔗 ตั้งลิงก์"
+    await interaction.response.send_message(f"📊 **Google Sheet**\n{st}",
+                                            view=SheetPanel(), ephemeral=True)
 
 
 @tree.command(name="setkey", description="🔑 ใส่ API key เพิ่ม (ตอนนี้รองรับ: gemini — ตาอ่านรูปฟรี)")
@@ -2613,7 +2855,8 @@ async def slash_help(interaction: discord.Interaction):
         "• อัตโนมัติ: สรุปเช้า 07:00 • รายงานเย็น 18:00 • เตือนงานก่อนเริ่ม • เตือนแบต — คุมที่ /auto\n"
         "• ความสว่างจอ/เสียง/จับเวลา/คิดเลข/เช็คเน็ต/หาเบอร์ในเครื่อง + /customers สมุดลูกค้า\n"
         "• สั่งกำกวมเมื่อไหร่ บอทจะโชว์ปุ่มให้กดเลือกทันที 🎛️\n"
-        "• รูปงาน Timestamp: พิมพ์ รูปงาน / เพิ่มแอปอื่นเป็นปุ่มด้วย /addapp\n\n"
+        "• รูปงาน Timestamp: พิมพ์ รูปงาน / เพิ่มแอปอื่นเป็นปุ่มด้วย /addapp\n"
+        "• Google Sheet: /sheet เชื่อม + ส่งงาน/ลูกค้าเข้าชีต (เปิด auto ได้)\n\n"
         "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /apps /customers /job /note /report /auto /setkey /update /help",
         ephemeral=True)
 
