@@ -573,17 +573,17 @@ async def process_message(user_text, channel_id):
     t = user_text.strip().lower()
     if "เปิดเสียง" in t or "เปิดเสียงหน่อย" in t or "เปิด เสียง" in t:
         VOICE_ENABLED[channel_id] = True
-        return "🔊 เปิดเสียงแล้วครับ ผมจะพูดตามทุกคำตอบให้ฟังเองครับ", True
+        return "🔊 เปิดเสียงแล้วครับ ผมจะพูดตามทุกคำตอบให้ฟังเองครับ", True, None
     if "ปิดเสียง" in t or "หุบเสียง" in t or "เงียบๆ" in t or "เงียบ ๆ" in t:
         VOICE_ENABLED[channel_id] = False
-        return "🔇 ปิดเสียงแล้วครับ ต่อจากนี้ตอบเป็นข้อความเฉย ๆ ครับ", False
+        return "🔇 ปิดเสียงแล้วครับ ต่อจากนี้ตอบเป็นข้อความเฉย ๆ ครับ", False, None
 
     history = memories.setdefault(channel_id, deque(maxlen=MAX_TURNS * 2))
     try:
         result = await asyncio.to_thread(ask_jarvis_sync, user_text, history)
     except Exception as e:
         log.error("Groq Error: %s", e)
-        return "ขออภัยครับ ระบบ AI ขัดข้องครับ", True
+        return "ขออภัยครับ ระบบ AI ขัดข้องครับ", True, None
 
     action = result.get("action")
     action_text = result.get("action_text") or user_text
