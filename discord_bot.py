@@ -460,6 +460,7 @@ SYSTEM_PROMPT = """คุณคือ Jarvis AI ผู้ช่วยส่ว�
 - "random"        : ทอยเต๋า/สุ่มเลข/เหี่ยวหัวก้อย — action_text เช่น "ทอยเต๋า 2 ดอก" หรือ "สุ่มเลข 1 ถึง 100"
 - "torch"         : เปิด/ปิดไฟฉาย — action_text "on" หรือ "off"
 - "camera"        : ถ่ายรูปจากมือถือส่งเข้าแชต — action_text "back" (หลัง) หรือ "front" (หน้า)
+- "map"           : Google Maps — action_text เช่น "นำทางไป<ชื่อลูกค้า>", "หา ปั๊ม ใกล้ฉัน", "แผนที่<สถานที่>"
 - "sheet_push"    : ส่งข้อมูลเข้า Google Sheet — action_text "งาน" หรือ "ลูกค้า"
 - "daily_report"  : สรุปงานวันนี้/รายงานงาน — สรุปงานที่ปิดวันนี้ ระยะสายรวม และงานค้าง
 - "brightness"     : ปรับความสว่างจอ — action_text เช่น "สว่างสุด", "หรี่จอ", "50%"
@@ -565,6 +566,10 @@ def fallback_intent(text):
         return "net", text
     if "แบต" in t or "battery" in t:
         return "check_battery", ""
+    if any(k in t for k in ("นำทาง", "เอาทาง", "แผนที่", "แมพ")) or \
+            (re.search(r"ไป\s*\S+\s*ยังไง", t)) or \
+            (re.search(r"ใกล้(ฉัน|เรา|ที่นี่)", t) and len(t) < 60):
+        return "map", text
     if any(k in t for k in ("ชีต", "sheet", "ซิงค์", "ส่งงานเข้าสเปรด")) and len(t) < 60 \
             and "เน็ต" not in t:
         return "sheet_push", text
@@ -1985,6 +1990,79 @@ class ChooserPanel(discord.ui.View):
 
 
 # ============================================================
+# 🗺️ Google Maps — นำทางไปลูกค้า / หาของใกล้ฉัน / เปิดพิกัด (ฟรี ไม่ต้องมี key)
+# ============================================================
+from urllib.parse import quote as _map_quote
+
+
+def _maps_open(uri):
+    r = subprocess.run(["termux-open", uri], capture_output=True, timeout=15)
+    return r.returncode == 0
+
+
+def hand_map(text=""):
+    t = (text or "").strip().lower()
+    near = bool(re.search(r"ใกล้(ฉัน|เรา|ที่นี่|บ้าน)", t))
+    q = re.sub(r"^(นำทางไป|นำทาง|เอาทางไป|เอาทาง|ทางไป|ไป|ดูแผนที่|แผนที่|แมพ|หาให้หน่อย|หา|ค้นหา)\s*",
+               " ", t).strip()
+    q = re.sub(r"\s*ยังไง$", "", q).strip()
+    q = re.sub(r"\s*ใกล้(ฉัน|เรา|ที่นี่|บ้าน)\s*$", "", q).strip()
+
+    # 1) นำทางไปลูกค้าในสมุด (ค้นชื่อ/ที่อยู่)
+    if q and not near:
+        rows = _cust_search(q)
+        if rows:
+            cid, name, phone, addr, note = rows[0]
+            target = addr if addr else name
+            try:
+                if _maps_open("https://maps.google.com/?daddr=" + _map_quote(target)):
+                    out = f"🗺️ เปิดเส้นทางไป **{name}** แล้วครับ"
+                    if addr:
+                        out += f"\n🏠 {addr[:120]}"
+                    if phone:
+                        out += f"\n☎ {phone}"
+                    return out
+            except Exception:
+                pass
+            return (f"เจอ {name} ในสมุดแล้วแต่เปิดแผนที่ไม่ได้ — ที่อยู่: {addr or name} "
+                    f"(ลองเปิดแอป Maps เองแล้ววางที่อยู่ดูครับ)")
+
+    # 2) หาสิ่งใกล้ฉัน (Maps จะใช้ตำแหน่งปัจจุบันให้เอง)
+    if near or (not q and ("แผนที่" in t or "map" in t)):
+        target = q or "ร้านอาหาร"
+        try:
+            if _maps_open("geo:0,0?q=" + _map_quote(target)):
+                return f"📍 เปิดแผนที่หา **{target}** ใกล้ตำแหน่งคุณแล้วครับ"
+        except Exception:
+            pass
+        return "❌ เปิดแผนที่ไม่สำเร็จ — ลองใหม่ครับ"
+
+    # 3) ค้นหาสถานที่ทั่วไป
+    if q:
+        try:
+            if _maps_open("geo:0,0?q=" + _map_quote(q)):
+                return f"🗺️ เปิดแผนที่ **{q}** แล้วครับ"
+        except Exception:
+            pass
+        return "❌ เปิดแผนที่ไม่สำเร็จ — ลองใหม่ครับ"
+
+    return ("พิมพ์แบบนี้ครับ:\n"
+            "• **นำทางไป<ชื่อลูกค้า>** — เอาที่อยู่จากสมุดลูกค้าเปิดเส้นทางให้\n"
+            "• **หา ปั๊ม ใกล้ฉัน** — หาร้าน/สถานที่ใกล้ตำแหน่งปัจจุบัน\n"
+            "• **แผนที่เพชรบูรณ์** — เปิดดูพื้นที่")
+
+
+HANDS["map"] = hand_map
+
+
+@tree.command(name="map", description="🗺️ Google Maps — นำทาง/หาใกล้ฉัน/ดูแผนที่")
+async def slash_map(interaction: discord.Interaction, สถานที่: str = ""):
+    await interaction.response.defer(thinking=True)
+    out = await asyncio.to_thread(hand_map, สถานที่)
+    await interaction.followup.send(out[:1900])
+
+
+# ============================================================
 # 📲 เปิดแอปบนมือถือ — พิมพ์ "เปิด<ชื่อแอป>" หรือแตะปุ่มใน /apps
 #    (ไม่ต้อง root: ใช้ deep-link ก่อน แล้ว monkey เรียกตัว launcher)
 # ============================================================
@@ -2856,7 +2934,8 @@ async def slash_help(interaction: discord.Interaction):
         "• ความสว่างจอ/เสียง/จับเวลา/คิดเลข/เช็คเน็ต/หาเบอร์ในเครื่อง + /customers สมุดลูกค้า\n"
         "• สั่งกำกวมเมื่อไหร่ บอทจะโชว์ปุ่มให้กดเลือกทันที 🎛️\n"
         "• รูปงาน Timestamp: พิมพ์ รูปงาน / เพิ่มแอปอื่นเป็นปุ่มด้วย /addapp\n"
-        "• Google Sheet: /sheet เชื่อม + ส่งงาน/ลูกค้าเข้าชีต (เปิด auto ได้)\n\n"
+        "• Google Sheet: /sheet เชื่อม + ส่งงาน/ลูกค้าเข้าชีต (เปิด auto ได้)\n"
+        "• Google Maps: นำทางไป<ลูกค้า> • หา ปั๊ม ใกล้ฉัน • /map สถานที่\n\n"
         "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /apps /customers /job /note /report /auto /setkey /update /help",
         ephemeral=True)
 
