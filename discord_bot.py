@@ -611,12 +611,13 @@ async def process_message(user_text, channel_id, images=None):
     # 👀 มีรูปแนบ → อ่านรูป (พิมพ์คำถามมาด้วย = ถามเรื่องรูป ไม่งั้นถอดข้อความ)
     if images:
         q = user_text if len((user_text or "").strip()) > 2 else None
-        outs = []
+        outs, errs = [], []
         for img_b, ct in images[:2]:
             try:
                 t = await asyncio.to_thread(ocr_image, img_b, ct, q)
             except Exception as e:
                 log.error("vision error: %s", e)
+                errs.append(str(e)[:110])
                 t = None
             if t:
                 outs.append(t.strip())
@@ -628,7 +629,10 @@ async def process_message(user_text, channel_id, images=None):
                        "แล้วไปพิมพ์ /job → ปุ่ม 📥 วางข้อความงาน วางลงไปได้เลยครับ")
             return ("📷 อ่านรูปแล้วครับ:\n```text\n" + body + "\n```" + tip,
                     False, None)
-        return ("ขออภัยครับ อ่านรูปไม่สำเร็จ — ลองส่งรูปใหม่อีกครั้งครับ", True, None)
+        reason = errs[0] if errs else "ไม่ทราบสาเหตุ"
+        return ("ขออภัยครับ อ่านรูปไม่สำเร็จ\nเหตุผล: " + reason +
+                "\n(ลองส่งรูปใหม่ได้เลยครับ หรือก๊อปข้อความในใบงานมาวางใน /job ก็ได้ครับ)",
+                True, None)
 
     # คำสั่งสั้น "ปิด"/"เปิด" — ถ้าเพิ่งเล่นไฟฉาย ให้หมายถึงไฟฉาย (ไม่ต้องรบกวนสมอง)
     bare_state = _bare_torch_state(user_text)
@@ -821,12 +825,37 @@ _TINY_PNG = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
              "AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
 
 
+def _vision_candidates():
+    """รายชื่อโมเดลภาพ: ตัวที่รู้จัก + ไล่จากรายชื่อจริงของ Groq (กันโมเดลถูกปลด)"""
+    cands = list(VISION_MODELS)
+    try:
+        from urllib.request import Request, urlopen
+        req = Request(
+            "https://api.groq.com/openai/v1/models",
+            headers={"Authorization": "Bearer " + GROQ_API_KEY})
+        data = json.loads(urlopen(req, timeout=20).read().decode())
+        for m in data.get("data", []):
+            mid = (m.get("id") or "") if isinstance(m, dict) else ""
+            if not mid or mid in cands:
+                continue
+            if any(k in mid.lower() for k in ("llama-4", "vision", "scout",
+                                              "maverick", "vl", "ocr")):
+                cands.append(mid)
+    except Exception as e:
+        log.warning("ดึงรายชื่อโมเดลภาพไม่สำเร็จ (%s) — ใช้รายชื่อที่รู้จัก", e)
+    return cands
+
+
+_vision_last_error = None
+
+
 def find_vision_model():
     """หาโมเดลอ่านภาพที่ยังมีชีวิต — โปรบด้วยรูปจิ๋ว (ตอบได้ = อ่านรูปได้จริง)"""
-    global _vision_model
+    global _vision_model, _vision_last_error
     if _vision_model:
         return _vision_model
-    for cand in VISION_MODELS:
+    _vision_last_error = None
+    for cand in _vision_candidates():
         try:
             groq_client.chat.completions.create(
                 model=cand,
@@ -844,9 +873,12 @@ def find_vision_model():
                                     "does not exist", "do not have access")):
                 log.info("ข้ามโมเดลภาพ %s (ถูกปลด/ไม่มีสิทธิ์)", cand)
                 continue
+            _vision_last_error = str(e)[:120]
             _vision_model = cand
             log.info("ใช้ตา (vision): %s (หมายเหตุ: %s)", cand, str(e)[:70])
             return cand
+    log.warning("ไม่มีโมเดลอ่านรูปที่ใช้ได้เลย — Groq อาจปลดหมดแล้ว: %s",
+                _vision_last_error)
     return None
 
 
@@ -874,22 +906,31 @@ def ocr_image(img_bytes, content_type="image/jpeg", question=None):
     """อ่านรูปด้วยโมเดล vision — ไม่ถามอะไร = ถอดข้อความทั้งหมดในรูป"""
     model = find_vision_model()
     if not model:
-        return None
+        raise RuntimeError(
+            "ไม่มีโมเดลอ่านรูปที่ใช้ได้ใน key นี้ (ถูกปลด/ไม่มีสิทธิ์ทั้งหมด)")
     if not question:
         question = ("ถอดข้อความทั้งหมดในรูปนี้เป็นข้อความธรรมดา "
                     "รักษาโครงสร้างบรรทัดและป้ายกำกับเดิมทุกบรรทัด "
                     "อย่าเพิ่มคำอธิบายหรือสรุปของคุณเอง "
                     "ถ้ารูปไม่มีข้อความเป็นหลัก ให้อธิบายรูปสั้น ๆ เป็นภาษาไทย")
     b64 = _base64.b64encode(img_bytes).decode()
-    resp = groq_client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": [
-            {"type": "text", "text": question},
-            {"type": "image_url", "image_url": {
-                "url": "data:" + content_type + ";base64," + b64}},
-        ]}],
-        temperature=0.1, max_tokens=1500)
-    return _reply_text(resp) or None
+    for attempt in (1, 2):
+        try:
+            resp = groq_client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": [
+                    {"type": "text", "text": question},
+                    {"type": "image_url", "image_url": {
+                        "url": "data:" + content_type + ";base64," + b64}},
+                ]}],
+                temperature=0.1, max_tokens=2048)
+            return _reply_text(resp) or None
+        except Exception as e:
+            s = str(e).lower()
+            if ("429" in s or "rate limit" in s) and attempt == 1:
+                time.sleep(3)
+                continue
+            raise
 
 
 # ============================================================
