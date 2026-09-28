@@ -197,7 +197,22 @@ SYSTEM_PROMPT = """คุณคือ Jarvis AI ผู้ช่วยส่ว�
 
 
 def parse_ai_json(raw):
-    raw = (raw or "").strip()
+    """แกะคำตอบ AI ให้เป็น dict — รองรับทุกรูปแบบที่โมเดลนิยมส่งมา"""
+    # gpt-oss บางครั้งส่ง content เป็น list ของ block [{"type":"text","text":"..."}]
+    if isinstance(raw, list):
+        parts = []
+        for b in raw:
+            if isinstance(b, dict):
+                if b.get("type") == "text" and b.get("text"):
+                    parts.append(b["text"])
+                elif isinstance(b.get("content"), str):
+                    parts.append(b["content"])
+            elif isinstance(b, str):
+                parts.append(b)
+        raw = "\n".join(parts)
+    if not isinstance(raw, str):
+        raw = str(raw)
+    raw = raw.strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```(json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw).strip()
@@ -211,6 +226,34 @@ def parse_ai_json(raw):
             except Exception:
                 pass
     return None
+
+
+def coerce_result(data, raw_text=None):
+    """ดึง {reply, action, action_text} จาก dict ที่แกะได้ แบบยืดหยุ่นสุด"""
+    if not isinstance(data, dict):
+        # โมเดลบางตัวคืน list ของ dict — เอาตัวแรกที่มี action/reply
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and ("reply" in item or "action" in item):
+                    data = item
+                    break
+        if not isinstance(data, dict):
+            return None
+    reply = data.get("reply") or data.get("response") or data.get("message") or ""
+    action = data.get("action") or data.get("intent") or None
+    atext = data.get("action_text") or data.get("action_input") or data.get("input") or ""
+    if isinstance(action, dict):
+        atext = atext or action.get("text") or action.get("input") or ""
+        action = action.get("name") or action.get("type") or None
+    if isinstance(action, str):
+        action = action.strip().lower() or None
+    if not reply and raw_text:
+        reply = raw_text.strip()
+    return {
+        "reply": (str(reply) or "รับทราบครับ").strip(),
+        "action": action,
+        "action_text": str(atext).strip(),
+    }
 
 
 def fallback_intent(text):
@@ -238,22 +281,28 @@ def ask_jarvis_sync(user_text, history):
     ]
     global _current_model, _model_candidates
     last_err = None
-    for attempt in (1, 2):
+    use_json_mode = True
+    for attempt in (1, 2, 3):
         try:
-            res = groq_client.chat.completions.create(
-                model=get_model(),
-                messages=messages,
-                temperature=0.5,
-                response_format={"type": "json_object"},
-            )
-            data = parse_ai_json(res.choices[0].message.content)
-            if data is None:
+            kwargs = dict(model=get_model(), messages=messages, temperature=0.5)
+            if use_json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
+            res = groq_client.chat.completions.create(**kwargs)
+            content = res.choices[0].message.content
+            data = parse_ai_json(content)
+            result = coerce_result(data, content)
+            if result is None:
+                # โมเดลตอบยาวไม่เป็น JSON — ใช้ข้อความดิบเป็น reply เลย
+                plain = content if isinstance(content, str) else ""
+                if isinstance(content, list):
+                    plain = "\n".join(
+                        b.get("text", "") for b in content
+                        if isinstance(b, dict) and b.get("type") == "text")
+                plain = (plain or "").strip()
+                if plain:
+                    return {"reply": plain[:1500], "action": None, "action_text": ""}
                 return {"reply": "รับทราบครับ", "action": None, "action_text": ""}
-            return {
-                "reply": (data.get("reply") or "รับทราบครับ").strip(),
-                "action": data.get("action"),
-                "action_text": (data.get("action_text") or "").strip(),
-            }
+            return result
         except Exception as e:
             last_err = e
             msg = str(e).lower()
@@ -263,20 +312,9 @@ def ask_jarvis_sync(user_text, history):
                 _model_candidates = [c for c in _model_candidates if c != dead]
                 log.warning("โมเดล %s ใช้ไม่ได้แล้ว — เลือกตัวใหม่", dead)
                 continue
-            if "response_format" in msg or "json" in msg and "400" in msg:
-                # โมเดลนี้ไม่ชอบ JSON mode — ลองใหม่โดยไม่ใส่
-                try:
-                    res = groq_client.chat.completions.create(
-                        model=get_model(), messages=messages, temperature=0.5)
-                    data = parse_ai_json(res.choices[0].message.content)
-                    if data:
-                        return {"reply": (data.get("reply") or "รับทราบครับ").strip(),
-                                "action": data.get("action"),
-                                "action_text": (data.get("action_text") or "").strip()}
-                    return {"reply": (res.choices[0].message.content or "รับทราบครับ").strip(),
-                            "action": None, "action_text": ""}
-                except Exception as e2:
-                    last_err = e2
+            if use_json_mode and ("response_format" in msg or ("json" in msg and "400" in msg)):
+                use_json_mode = False  # โมเดลนี้ไม่ชอบ JSON mode — ปิดแล้วลองใหม่
+                continue
             raise
     raise last_err or RuntimeError("AI error")
 
