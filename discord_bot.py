@@ -459,6 +459,7 @@ SYSTEM_PROMPT = """คุณคือ Jarvis AI ผู้ช่วยส่ว�
 - "random"        : ทอยเต๋า/สุ่มเลข/เหี่ยวหัวก้อย — action_text เช่น "ทอยเต๋า 2 ดอก" หรือ "สุ่มเลข 1 ถึง 100"
 - "torch"         : เปิด/ปิดไฟฉาย — action_text "on" หรือ "off"
 - "camera"        : ถ่ายรูปจากมือถือส่งเข้าแชต — action_text "back" (หลัง) หรือ "front" (หน้า)
+- "daily_report"  : สรุปงานวันนี้/รายงานงาน — สรุปงานที่ปิดวันนี้ ระยะสายรวม และงานค้าง
 - "open_app"       : เปิดแอปบนมือถือ — action_text เป็นชื่อแอป เช่น "youtube", "facebook", "line", "tiktok", "instagram", "shopee", "gmail", "maps" (ถ้าขอเปิดแอปธนาคาร ปฏิเสธสุภาพ ๆ เพื่อความปลอดภัย)
 - "location"      : ถามว่าฉันอยู่ที่ไหน/ตำแหน่งปัจจุบัน/พิกัด
 
@@ -534,6 +535,8 @@ def coerce_result(data, raw_text=None):
 def fallback_intent(text):
     """กัน AI ส่ง action มาไม่ครบ — เดาจากคีย์เวิร์ดไทยแบบระบบเดิม"""
     t = text.lower()
+    if any(k in t for k in ("สรุปงาน", "รายงานงาน", "งานวันนี้", "รายงานวันนี้")) and len(t) < 50:
+        return "daily_report", ""
     if "แบต" in t or "battery" in t:
         return "check_battery", ""
     if ("เปิด" in t or "เข้า" in t) and find_app(t):
@@ -1627,6 +1630,217 @@ async def slash_apps(interaction: discord.Interaction):
 HANDS["open_app"] = hand_open_app
 
 
+# ============================================================
+# 🤖 ศูนย์ระบบอัตโนมัติ: รายงานเย็น + เตือนงานล่วงหน้า + เตือนแบต
+#    ตั้งค่าเปิด/ปิดได้ที่ /auto (เก็บใน settings.json)
+# ============================================================
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "settings.json")
+AUTO = {"morning": True, "evening": True, "job_alert": True,
+        "battery_alert": True, "battery_level": 20}
+REPORT_HOUR = 18
+_JOB_ALERT_MIN = 15      # เตือนก่อนงานเริ่ม 15 นาที
+
+
+def _load_auto():
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            AUTO.update(json.load(f))
+    except Exception:
+        pass
+
+
+def _save_auto():
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(AUTO, f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        log.warning("save settings: %s", e)
+
+
+_load_auto()
+
+
+def report_text():
+    """ข้อความสรุปงานวันนี้ (ปิดแล้ว/สายรวม/ค้าง)"""
+    try:
+        n, meters = _jobs_today()
+        opens = _jobs_open()
+    except Exception as e:
+        return f"❌ อ่านฐานข้อมูลงานไม่ได้: {str(e)[:80]}"
+    lines = ["🌆 **สรุปงานวันนี้**",
+             f"✅ ปิดแล้ว {n} งาน" + (f" • ระยะสายรวม {meters:g} ม." if meters else ""),
+             f"🔓 ค้าง {len(opens)} งาน"]
+    for j in opens[:5]:
+        lines.append(f"  • #{j['id']} {(j['customer'] or '(ไม่มีชื่อ)')[:40]}")
+    if len(opens) > 5:
+        lines.append(f"  ...และอีก {len(opens) - 5} งาน")
+    return "\n".join(lines)
+
+
+HANDS["daily_report"] = lambda t: report_text()
+
+
+def _job_start_today(j):
+    """เวลาเริ่มของงานวันนี้ (จาก extra เวลา/วันเวลา) — ไม่ใช่วันนี้ = None"""
+    ex = j.get("extra") or {}
+    s = str(ex.get("วันเวลา") or ex.get("เวลา") or "")
+    m = re.search(r"(\d{1,2})[:.](\d{2})", s)
+    if not m:
+        return None
+    md = re.search(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", s)
+    if md:
+        d, mo, y = int(md.group(1)), int(md.group(2)), int(md.group(3))
+        if y < 100:
+            y += 2500 if y > 40 else 2000
+        today = datetime.now()
+        try:
+            if (d, mo, y) != (today.day, today.month, today.year):
+                return None
+        except ValueError:
+            return None
+    now = datetime.now()
+    try:
+        return now.replace(hour=int(m.group(1)), minute=int(m.group(2)),
+                           second=0, microsecond=0)
+    except ValueError:
+        return None
+
+
+_job_alerted = set()
+
+
+async def job_alert_loop():
+    """ไล่งานที่กำลังจะเริ่ม — เตือนล่วงหน้า 15 นาที (งานละ 1 ครั้ง)"""
+    while True:
+        try:
+            if AUTO.get("job_alert") and _last_channel_id:
+                now = datetime.now()
+                for j in await asyncio.to_thread(_jobs_open):
+                    st = _job_start_today(j)
+                    if not st:
+                        continue
+                    delta = (st - now).total_seconds()
+                    key = (j["id"], st.date())
+                    if 0 < delta <= _JOB_ALERT_MIN * 60 and key not in _job_alerted:
+                        _job_alerted.add(key)
+                        ch = bot.get_channel(_last_channel_id)
+                        if ch:
+                            await reply_long(
+                                ch, f"⏰ อีก {int(delta // 60)} นาทีถึงเวลางาน "
+                                    f"#{j['id']} {(j['customer'] or '')[:40]} "
+                                    f"(เริ่ม {st:%H:%M} น.) นะครับ")
+        except Exception as e:
+            log.warning("job alert loop: %s", e)
+        await asyncio.sleep(60)
+
+
+_battery_alerted = False
+
+
+async def battery_loop():
+    """เฝ้าแบตทุก 10 นาที — ต่ำกว่าเกณฑ์แล้วไม่ได้ชาร์จ = เตือน (ครั้งเดียวจนกว่าจะชาร์จ)"""
+    global _battery_alerted
+    while True:
+        try:
+            if AUTO.get("battery_alert") and _last_channel_id:
+                r = await asyncio.to_thread(
+                    subprocess.run, ["termux-battery-get"],
+                    capture_output=True, timeout=25)
+                data = json.loads(r.stdout.decode())
+                pct = data.get("percentage")
+                status = str(data.get("status", "")).lower()
+                if isinstance(pct, int) and "charg" not in status and "full" not in status:
+                    if pct <= int(AUTO.get("battery_level", 20)):
+                        if not _battery_alerted:
+                            _battery_alerted = True
+                            ch = bot.get_channel(_last_channel_id)
+                            if ch:
+                                await reply_long(
+                                    ch, f"🔋 แบตเหลือ {pct}% แล้วนะครับ "
+                                        "เสียบชาร์จก่อนดีกว่า กลัวบอทสตาร์ทไม่ขึ้น 😅")
+                    elif pct > int(AUTO.get("battery_level", 20)) + 5:
+                        _battery_alerted = False
+                else:
+                    _battery_alerted = False
+        except FileNotFoundError:
+            pass   # ไม่มี termux-battery-get — ปิดเงียบ ๆ
+        except Exception as e:
+            log.warning("battery loop: %s", e)
+        await asyncio.sleep(600)
+
+
+async def evening_report_loop():
+    """รายงานสรุปงานอัตโนมัติทุกวัน 18:00 (ปิดแล้วกี่งาน สายรวมกี่เมตร ค้างกี่งาน)"""
+    while True:
+        try:
+            now = datetime.now()
+            target = now.replace(hour=REPORT_HOUR, minute=0, second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            await asyncio.sleep(max(5, (target - now).total_seconds()))
+            if AUTO.get("evening", True) and _last_channel_id:
+                ch = bot.get_channel(_last_channel_id)
+                if ch:
+                    await reply_long(ch, await asyncio.to_thread(report_text))
+        except Exception as e:
+            log.warning("evening loop: %s", e)
+            await asyncio.sleep(300)
+
+
+_AUTO_LABELS = [("morning", "สรุปเช้า 07:00"), ("evening", "รายงานเย็น 18:00"),
+                ("job_alert", "เตือนงานล่วงหน้า"), ("battery_alert", "เตือนแบตต่ำ")]
+
+
+def _auto_text():
+    lines = ["🤖 **ศูนย์ระบบอัตโนมัติของคุณ**", ""]
+    for k, lab in _AUTO_LABELS:
+        lines.append(("✅ เปิด" if AUTO.get(k) else "⬜ ปิด") + " — " + lab)
+    lines.append("")
+    lines.append(f"🔋 เตือนเมื่อแบตต่ำกว่า {AUTO.get('battery_level', 20)}%")
+    lines.append("\nกดปุ่มด้านล่างเพื่อสลับ เปิด/ปิด ได้เลยครับ")
+    return "\n".join(lines)
+
+
+class AutoPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    async def _flip(self, interaction: discord.Interaction, key: str):
+        AUTO[key] = not AUTO.get(key, True)
+        _save_auto()
+        await interaction.response.edit_message(content=_auto_text(), view=self)
+
+    @discord.ui.button(label="สรุปเช้า", emoji="☀️")
+    async def b1(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._flip(interaction, "morning")
+
+    @discord.ui.button(label="รายงานเย็น", emoji="🌆")
+    async def b2(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._flip(interaction, "evening")
+
+    @discord.ui.button(label="เตือนงาน", emoji="⏰")
+    async def b3(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._flip(interaction, "job_alert")
+
+    @discord.ui.button(label="เตือนแบต", emoji="🔋")
+    async def b4(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._flip(interaction, "battery_alert")
+
+
+@tree.command(name="auto", description="🤖 เปิด/ปิดระบบอัตโนมัติทั้งหมด")
+async def slash_auto(interaction: discord.Interaction):
+    await interaction.response.send_message(_auto_text(), view=AutoPanel(),
+                                            ephemeral=True)
+
+
+@tree.command(name="report", description="🌆 สรุปงานวันนี้ทันที (ปิดกี่งาน/สายรวม/ค้าง)")
+async def slash_report(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    out = await asyncio.to_thread(report_text)
+    await interaction.followup.send(out)
+
+
 @tree.command(name="setkey", description="🔑 ใส่ API key เพิ่ม (ตอนนี้รองรับ: gemini — ตาอ่านรูปฟรี)")
 @app_commands.choices(ชนิด=[
     app_commands.Choice(name="gemini (ตาอ่านรูป ฟรี)", value="gemini"),
@@ -1818,7 +2032,8 @@ async def morning_briefing_loop():
             if target <= now:
                 target += timedelta(days=1)
             await asyncio.sleep(max(5, (target - now).total_seconds()))
-            await send_morning_briefing()
+            if AUTO.get("morning", True):
+                await send_morning_briefing()
         except Exception as e:
             log.warning("briefing loop: %s", e)
             await asyncio.sleep(300)
@@ -1863,8 +2078,9 @@ async def slash_help(interaction: discord.Interaction):
         "• ระบบงาน: พิมพ์ /job แล้วกดปุ่ม (แยกจากแชต 100%)\n"
         "• ส่งรูปมาให้ Jarvis อ่านได้ (ถอดข้อความในรูป / ถามเรื่องในรูป)\n"
         "• โน้ตด่วน: /note • สรุปเช้าทุกวัน 07:00 (งานค้าง + อากาศ)\n"
-        "• เปิดแอปมือถือ: พิมพ์ เปิดไลน์/เปิดเฟส/เปิดติ๊กต็อก หรือแตะปุ่มใน /apps\n\n"
-        "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /apps /job /note /setkey /update /help",
+        "• เปิดแอปมือถือ: พิมพ์ เปิดไลน์/เปิดเฟส/เปิดติ๊กต็อก หรือแตะปุ่มใน /apps\n"
+        "• อัตโนมัติ: สรุปเช้า 07:00 • รายงานเย็น 18:00 • เตือนงานก่อนเริ่ม • เตือนแบต — คุมที่ /auto\n\n"
+        "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /apps /job /note /report /auto /setkey /update /help",
         ephemeral=True)
 
 
@@ -1911,6 +2127,9 @@ async def on_ready():
     asyncio.create_task(reminder_loop())
     asyncio.create_task(_auto_update_task())
     asyncio.create_task(morning_briefing_loop())
+    asyncio.create_task(evening_report_loop())
+    asyncio.create_task(job_alert_loop())
+    asyncio.create_task(battery_loop())
     log.info("✅ Jarvis Discord bot online แล้ว! (%s) — มือ: %s",
              bot.user, ", ".join(sorted(HANDS)) or "โหมดคุยอย่างเดียว")
 
