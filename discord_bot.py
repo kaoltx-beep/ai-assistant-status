@@ -366,8 +366,12 @@ def ask_jarvis_sync(user_text, history):
 
 
 def clean_reply(text):
-    # 🔥 ระบบล้างคำหลุดแบบระบบเดิม
-    return (text or "").replace("ค่ะ", "ครับ").replace("คะ", "ครับ").replace("ครับ/ค่ะ", "ครับ")
+    # ล้างคำหลุดจากโมเดล (คำตอบ:, Response:, Reply: ฯลฯ) + คำหลุดเพศ
+    t = (text or "").strip()
+    t = re.sub(r"^\s*(คำตอบ|คำตอบคือ|Response|Reply|Answer|Output)\s*[:：]\s*", "", t,
+               flags=re.IGNORECASE)
+    t = re.sub(r"^\s*(Jarvis|จาร์วิส)\s*[:：]\s*", "", t)
+    return t.replace("ค่ะ", "ครับ").replace("คะ", "ครับ").replace("ครับ/ค่ะ", "ครับ")
 
 
 async def process_message(user_text, channel_id):
