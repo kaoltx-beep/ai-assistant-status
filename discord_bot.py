@@ -1862,6 +1862,99 @@ HANDS["contacts"] = hand_contacts
 
 
 # ============================================================
+# 🎛️ ปุ่มเสนอทางเลือก — คำสั่งที่ทำได้หลายอย่าง → ให้กดเลือกเอง
+# ============================================================
+def chooser_options(text, channel_id):
+    """คืนรายการปุ่ม (ข้อความปุ่ม, action, arg) ถ้าคำสั่งกำกวม — ไม่กำกวมคืน None"""
+    t = (text or "").strip().lower()
+    if not t or len(t) > 80:
+        return None
+    has = lambda *ks: any(k in t for k in ks)
+    # ไฟฉายแต่ไม่บอกทิศทาง
+    if has("ไฟฉาย", "ไฟแฟลช", "torch"):
+        if has("เปิด", "ปิด", "ดับ"):
+            return None
+        return [("🔦 เปิดไฟฉาย", "torch", "เปิดไฟฉาย"),
+                ("🌑 ปิดไฟฉาย", "torch", "ปิดไฟฉาย")]
+    # ถ่ายรูปแต่ไม่บอกกล้องไหน
+    if has("ถ่ายรูป", "ถ่ายภาพ", "ถ่ายให้"):
+        if has("หน้า", "เซลฟี่", "เซลฟี", "หลัง", "selfie"):
+            return None
+        return [("📸 กล้องหลัง", "camera", "หลัง"),
+                ("🤳 เซลฟี่ (กล้องหน้า)", "camera", "หน้า")]
+    # ความสว่างแต่ไม่บอกทิศทาง
+    if has("ความสว่าง", "แสงจอ"):
+        # "ความสว่าง" มี "สว่าง" ซ่อนอยู่ — เช็คทิศทางแบบเฉพาะเจาะจง
+        if has("หรี่", "%", "สว่างสุด", "สว่างขึ้น", "สว่างลง") or re.search(r"สว่าง\s*\d", t):
+            return None
+        return [("🔆 สว่างสุด", "brightness", "สว่างสุด"),
+                ("🌙 หรี่จอ", "brightness", "หรี่จอ")]
+    # "เสียง" ลอย ๆ — เปิดเสียงพูด? ปรับเสียงเครื่อง?
+    if ("เสียง" in t and not has("เปิดเสียง", "ปิดเสียง", "ดัง", "เบา", "ปิด",
+                                "เพิ่ม", "ลด", "ริง", "เรียกเข้า", "สื่อ", "เพลง",
+                                "หุบ", "เงียบ", "เสียงพูด")):
+        return [("🔊 เปิดเสียงพูด", "voice_on", ""),
+                ("🔇 ปิดเสียงพูด", "voice_off", ""),
+                ("🔉 ลดเสียงเครื่อง", "volume", "ลดเสียง"),
+                ("🔊 เสียงดังสุด", "volume", "เสียงดังสุด")]
+    # คำสั่งสั้น "เปิด"/"ปิด" ที่ยังไม่มีบริบท → เมนูเลือก
+    if t in ("เปิด", "ปิด", "ดับ", "ปิดดิ"):
+        if LAST_HAND.get(channel_id) == "torch":
+            return None   # จำได้ว่าเพิ่งเล่นไฟฉาย — ให้ logic เดิมจัดการ
+        if t == "เปิด":
+            return [("🔦 เปิดไฟฉาย", "torch", "เปิดไฟฉาย"),
+                    ("🔊 เสียงดังสุด", "volume", "เสียงดังสุด"),
+                    ("📸 ถ่ายรูปหลัง", "camera", "หลัง"),
+                    ("🌆 สรุปงานวันนี้", "daily_report", "สรุปงานวันนี้")]
+        return [("🌑 ปิดไฟฉาย", "torch", "ปิดไฟฉาย"),
+                ("🔇 ปิดเสียงพูด", "voice_off", ""),
+                ("🔉 ลดเสียงเครื่อง", "volume", "ลดเสียง"),
+                ("🔇 ปิดเสียงสื่อ/เพลง", "volume", "ปิดเสียงสื่อ")]
+    return None
+
+
+class ActionBtn(discord.ui.Button):
+    def __init__(self, label, action, arg):
+        super().__init__(label=label[:80], style=discord.ButtonStyle.secondary)
+        self.action, self.arg = action, arg
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        if self.action == "voice_on":
+            VOICE_ENABLED[interaction.channel_id] = True
+            await interaction.followup.send("🔊 เปิดเสียงพูดแล้วครับ")
+            return
+        if self.action == "voice_off":
+            VOICE_ENABLED[interaction.channel_id] = False
+            await interaction.followup.send("🔇 ปิดเสียงพูดแล้วครับ ต่อไปตอบเป็นข้อความเฉย ๆ")
+            return
+        hand = HANDS.get(self.action)
+        if not hand:
+            await interaction.followup.send("มือนี้ยังไม่พร้อมใช้ครับ")
+            return
+        try:
+            res = await asyncio.to_thread(hand, self.arg)
+        except Exception as e:
+            await interaction.followup.send(f"❌ {str(e)[:150]}")
+            return
+        if isinstance(res, tuple):
+            out, attach = res
+        else:
+            out, attach = res, None
+        if attach:
+            await interaction.followup.send(out[:1900], file=discord.File(attach))
+        else:
+            await interaction.followup.send(out[:1900])
+
+
+class ChooserPanel(discord.ui.View):
+    def __init__(self, opts):
+        super().__init__(timeout=180)
+        for label, action, arg in opts[:10]:
+            self.add_item(ActionBtn(label, action, arg))
+
+
+# ============================================================
 # 📲 เปิดแอปบนมือถือ — พิมพ์ "เปิด<ชื่อแอป>" หรือแตะปุ่มใน /apps
 #    (ไม่ต้อง root: ใช้ deep-link ก่อน แล้ว monkey เรียกตัว launcher)
 # ============================================================
@@ -2411,7 +2504,8 @@ async def slash_help(interaction: discord.Interaction):
         "• โน้ตด่วน: /note • สรุปเช้าทุกวัน 07:00 (งานค้าง + อากาศ)\n"
         "• เปิดแอปมือถือ: พิมพ์ เปิดไลน์/เปิดเฟส/เปิดติ๊กต็อก หรือแตะปุ่มใน /apps\n"
         "• อัตโนมัติ: สรุปเช้า 07:00 • รายงานเย็น 18:00 • เตือนงานก่อนเริ่ม • เตือนแบต — คุมที่ /auto\n"
-        "• ความสว่างจอ/เสียง/จับเวลา/คิดเลข/เช็คเน็ต/หาเบอร์ในเครื่อง + /customers สมุดลูกค้า\n\n"
+        "• ความสว่างจอ/เสียง/จับเวลา/คิดเลข/เช็คเน็ต/หาเบอร์ในเครื่อง + /customers สมุดลูกค้า\n"
+        "• สั่งกำกวมเมื่อไหร่ บอทจะโชว์ปุ่มให้กดเลือกทันที 🎛️\n\n"
         "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /apps /customers /job /note /report /auto /setkey /update /help",
         ephemeral=True)
 
@@ -2492,6 +2586,15 @@ async def on_message(message: discord.Message):
                 log.warning("โหลดรูปแนบไม่ได้: %s", e)
     if not text and not images:
         text = "สวัสดี"
+
+    # 🎛️ คำสั่งกำกวม → โชว์ปุ่มให้เลือกเอง
+    if text and not images:
+        opts = chooser_options(text, message.channel.id)
+        if opts:
+            await message.channel.send(
+                "🎛️ คำสั่งนี้ทำได้หลายอย่างครับ — กดปุ่มเลือกเลย:",
+                view=ChooserPanel(opts))
+            return
 
     async with message.channel.typing():
         reply, want_voice, attach = await process_message(
