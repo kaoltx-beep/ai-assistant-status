@@ -108,8 +108,9 @@ def get_model():
         _model_candidates = build_candidates()
     for cand in _model_candidates[:14]:
         try:
+            # โปรบแบบไม่จำกัด token — โมเดลแบบคิดก่อนตอบ (gpt-oss/qwen) จะ 400 ถ้าใส่ max_tokens น้อย
             groq_client.chat.completions.create(
-                model=cand, messages=[{"role": "user", "content": "ping"}], max_tokens=1)
+                model=cand, messages=[{"role": "user", "content": "ping"}])
             _current_model = cand
             log.info("ใช้โมเดล Groq: %s", cand)
             return cand
@@ -119,8 +120,15 @@ def get_model():
                 _current_model = cand
                 log.info("ใช้โมเดล Groq: %s (ช่วงนี้โควตาแน่นนิดหน่อย)", cand)
                 return cand
-            log.info("ข้ามโมเดล %s (%s)", cand, str(e)[:80])
-            continue
+            dead = any(k in s for k in ("decommission", "model_not_found",
+                                        "does not exist", "do not have access"))
+            if dead:
+                log.info("ข้ามโมเดล %s (ถูกปลด/ไม่มีสิทธิ์)", cand)
+                continue
+            # error อื่น (เช่นพารามิเตอร์ไม่ตรง) = โมเดลยังมีชีวิต ให้ลองใช้จริง
+            _current_model = cand
+            log.info("ใช้โมเดล Groq: %s (หมายเหตุ: %s)", cand, str(e)[:70])
+            return cand
     raise RuntimeError("ไม่พบโมเดลที่ใช้ได้ — เช็ค key ที่ console.groq.com")
 
 
@@ -253,20 +261,17 @@ def clean_reply(text):
 # ============================================================
 VOICE_ENABLED = {}  # channel_id -> bool (ค่าเริ่มต้น: เปิด)
 _OUTDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_output")
+_edge_missing = False
 _gtts_missing = False
 
 
 def voice_note_file(text):
-    """สร้างไฟล์ mp3 เสียงผู้หญิงไทย — คืน path หรือ None ถ้าใช้ไม่ได้"""
-    global _gtts_missing
-    if _gtts_missing or not text:
+    """สร้างไฟล์ mp3 — ลำดับ: 1) edge-tts เสียงผู้หญิงไทย Achara (Neural ธรรมชาติมาก)
+    2) gTTS เสียง Google 3) None (= speak_sync จะ fallback ไป termux-tts-speak)"""
+    global _edge_missing, _gtts_missing
+    if not text:
         return None
-    try:
-        from gtts import gTTS
-    except ImportError:
-        _gtts_missing = True
-        log.warning("ยังไม่ได้ติดตั้ง gTTS — รัน: pip install gTTS (ชั่วคราวใช้เสียงระบบเดิม)")
-        return None
+    spoken = clean_reply(text)[:600]
     try:
         os.makedirs(_OUTDIR, exist_ok=True)
         now = time.time()
@@ -277,11 +282,39 @@ def voice_note_file(text):
             except Exception:
                 pass
         path = os.path.join(_OUTDIR, f"voice_{int(now * 10)}.mp3")
-        gTTS(text=text, lang="th").save(path)
-        return path
     except Exception as e:
-        log.warning("gTTS Error: %s", e)
+        log.warning("output dir error: %s", e)
         return None
+
+    # 1) Edge TTS — เสียงผู้หญิงไทย "Achara" ธรรมชาติที่สุด
+    if not _edge_missing:
+        try:
+            subprocess.run(
+                ["edge-tts", "--voice", "th-TH-AcharaNeural", "--text", spoken,
+                 "--write-media", path],
+                capture_output=True, timeout=45)
+            if os.path.exists(path) and os.path.getsize(path) > 1000:
+                return path
+            log.warning("edge-tts ไฟล์ไม่สมบูรณ์ ลอง gTTS ต่อ")
+        except FileNotFoundError:
+            _edge_missing = True
+            log.warning("ยังไม่มี edge-tts — ติดตั้ง: pip install edge-tts (เสียงจะเพราะขึ้นมาก)")
+        except Exception as e:
+            log.warning("edge-tts error: %s — ลอง gTTS ต่อ", e)
+
+    # 2) gTTS — เสียง Google
+    if not _gtts_missing:
+        try:
+            from gtts import gTTS
+            gTTS(text=spoken, lang="th").save(path)
+            if os.path.exists(path) and os.path.getsize(path) > 1000:
+                return path
+        except ImportError:
+            _gtts_missing = True
+            log.warning("ยังไม่ได้ติดตั้ง gTTS — รัน: pip install gTTS")
+        except Exception as e:
+            log.warning("gTTS Error: %s", e)
+    return None
 
 
 def speak_sync(text):
