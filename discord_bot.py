@@ -545,7 +545,9 @@ def coerce_result(data, raw_text=None):
 def fallback_intent(text):
     """กัน AI ส่ง action มาไม่ครบ — เดาจากคีย์เวิร์ดไทยแบบระบบเดิม"""
     t = text.lower()
-    if any(k in t for k in ("สรุปงาน", "รายงานงาน", "งานวันนี้", "รายงานวันนี้")) and len(t) < 50:
+    if any(k in t for k in ("งานวันนี้", "ตารางวันนี้", "เส้นทางวันนี้")) and len(t) < 50:
+        return "today", ""
+    if any(k in t for k in ("สรุปงาน", "รายงานงาน", "รายงานวันนี้")) and len(t) < 50:
         return "daily_report", ""
     if re.search(r"โทร\s*0\d{8,9}", t):
         return "open_app", text
@@ -1993,6 +1995,99 @@ class ChooserPanel(discord.ui.View):
 
 
 # ============================================================
+# 📅 งานวันนี้ — กดปุ๊บเห็นทั้งวัน + เส้นทาง A→B→C ใน Google Maps
+# ============================================================
+def _job_start_dt(j):
+    """เวลาเริ่มงานวันนี้ (จาก extra เวลา/วันเวลา) — ไม่ใช่วันนี้ = None"""
+    ex = j.get("extra") or {}
+    s = str(ex.get("วันเวลา") or ex.get("เวลา") or "")
+    m = re.search(r"(\d{1,2})[:.](\d{2})", s)
+    if not m:
+        return None
+    md = re.search(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", s)
+    now = datetime.now()
+    if md:
+        d, mo, y = int(md.group(1)), int(md.group(2)), int(md.group(3))
+        if y < 100:
+            y += 2500 if y > 40 else 2000
+        try:
+            if (d, mo, y) != (now.day, now.month, now.year):
+                return None
+        except ValueError:
+            return None
+    try:
+        return now.replace(hour=int(m.group(1)), minute=int(m.group(2)),
+                           second=0, microsecond=0)
+    except ValueError:
+        return None
+
+
+def today_jobs_text():
+    """ข้อความสรุปงานวันนี้ เรียงตามเวลา"""
+    jobs = [j for j in _jobs_open(50) if _job_start_dt(j)]
+    jobs.sort(key=lambda j: _job_start_dt(j))
+    now = datetime.now()
+    if not jobs:
+        return ("📅 วันนี้ไม่มีงานที่ระบุเวลาครับ — สบาย ๆ\n"
+                "(เพิ่มงานที่ /job โดยวางข้อความงานที่มีเวลา เช่น 09:00-12:00 ก็จะโผล่ที่นี่)")
+    lines = [f"📅 **งานวันนี้ ({now:%d/%m}) — {len(jobs)} งาน เรียงตามเวลา:**", ""]
+    for i, j in enumerate(jobs, 1):
+        st = _job_start_dt(j)
+        mark = "✅" if st <= now else ("🔔" if (st - now).total_seconds() <= 3600 else "⏳")
+        lines.append(f"{mark} **{i}. {st:%H:%M}** #{j['id']} {(j['customer'] or '')[:40]}")
+        if j.get("address"):
+            lines.append(f"     🏠 {j['address'][:100]}")
+    lines.append("")
+    lines.append("🗺️ กดปุ่ม **เส้นทางวันนี้** ด้านล่าง = Maps จัดเส้นทาง A→B→C ให้ทั้งวันเลยครับ")
+    return "\n".join(lines)
+
+
+def today_route_url():
+    """ลิงก์ Maps วางเส้นทางทุกงานวันนี้ (พิกัดก่อน ไม่มีใช้ที่อยู่ แล้วชื่อ)"""
+    jobs = [j for j in _jobs_open(50) if _job_start_dt(j)]
+    jobs.sort(key=lambda j: _job_start_dt(j))
+    pts = []
+    for j in jobs:
+        ex = j.get("extra") or {}
+        coord = str(ex.get("พิกัด") or "")
+        if re.match(r"^\d{1,3}\.\d{4,},\d{1,3}\.\d{4,}$", coord):
+            pts.append(coord)
+        elif j.get("address"):
+            pts.append(j["address"])
+        elif j.get("customer"):
+            pts.append(j["customer"])
+    if not pts:
+        return None
+    if len(pts) == 1:
+        return "https://www.google.com/maps/dir/?api=1&destination=" + _map_quote(pts[0])
+    url = ("https://www.google.com/maps/dir/?api=1&travelmode=driving"
+           "&destination=" + _map_quote(pts[-1]))
+    mids = pts[:-1]
+    if mids:
+        url += "&waypoints=" + _map_quote("|".join(mids))
+    return url
+
+
+HANDS["today"] = lambda t: today_jobs_text()
+
+
+class TodayView(discord.ui.View):
+    def __init__(self, url):
+        super().__init__()
+        if url:
+            self.add_item(discord.ui.Button(
+                label="เส้นทางวันนี้ (Maps)", emoji="🗺️", url=url))
+
+
+@tree.command(name="today", description="📅 งานวันนี้เรียงตามเวลา + เส้นทาง Maps ทั้งวัน")
+async def slash_today(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    txt = await asyncio.to_thread(today_jobs_text)
+    url = await asyncio.to_thread(today_route_url)
+    await interaction.followup.send(txt, view=TodayView(url))
+
+
+# ============================================================
 # 🗺️ Google Maps — นำทางไปลูกค้า / หาของใกล้ฉัน / เปิดพิกัด (ฟรี ไม่ต้องมี key)
 # ============================================================
 from urllib.parse import quote as _map_quote
@@ -2198,9 +2293,22 @@ class AppBtn(discord.ui.Button):
         await interaction.followup.send(out, ephemeral=True)
 
 
+class TodayBtn(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="งานวันนี้", emoji="📅",
+                         style=discord.ButtonStyle.success)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True)
+        txt = await asyncio.to_thread(today_jobs_text)
+        url = await asyncio.to_thread(today_route_url)
+        await interaction.followup.send(txt, view=TodayView(url))
+
+
 class AppsPanel(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=300)
+        self.add_item(TodayBtn())
         for a in APPS[:15]:
             self.add_item(AppBtn(a))
         for a in CUSTOM_APPS[:8]:
@@ -2873,6 +2981,12 @@ async def send_morning_briefing():
         w = await asyncio.to_thread(HANDS["weather"], BRIEF_CITY)
         if w:
             parts.append("🌤️ " + str(w).split("\n")[0][:120])
+    except Exception:
+        pass
+    try:
+        url = today_route_url()
+        if url:
+            parts.append("🗺️ เส้นทางวันนี้: " + url)
     except Exception:
         pass
     await reply_long(channel, "\n".join(parts))
