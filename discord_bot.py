@@ -1157,7 +1157,7 @@ UPDATE_URL = ("https://codeload.github.com/kaoltx-beep/ai-assistant-status/"
               "tar.gz/refs/heads/" + UPDATE_BRANCH)
 SELF_PATH = os.path.abspath(__file__)
 _UPDATE_MARKER = "jarvis-self-update"
-BOT_BUILD = "build 2026-09-29 09:50 (ชื่อ-พิกัดแยกถูก)"
+BOT_BUILD = "build 2026-09-29 19:10 (ลบลูกค้า)"
 
 
 def _fetch_latest_code():
@@ -1937,6 +1937,56 @@ class CustomerSearchModal(discord.ui.Modal, title="🔎 ค้นหาลูก
             f"🔍 **เจอ {len(rows)} รายการ**\n```\n{body[:1800]}\n```", ephemeral=True)
 
 
+class _CustDeleteConfirm(discord.ui.View):
+    def __init__(self, cid, name):
+        super().__init__(timeout=120)
+        self.cid = cid
+        self.name = name
+
+    @discord.ui.button(label="ลบเลย", emoji="🗑️",
+                       style=discord.ButtonStyle.danger)
+    async def yes(self, interaction: discord.Interaction,
+                  button: discord.ui.Button):
+        await asyncio.to_thread(_cust_delete, self.cid)
+        await interaction.response.edit_message(
+            content=f"🗑️ ลบลูกค้า #{self.cid} ({(self.name or '')[:40]}) "
+                    "แล้วครับ",
+            view=None)
+
+    @discord.ui.button(label="ยกเลิก", emoji="❌",
+                       style=discord.ButtonStyle.secondary)
+    async def no(self, interaction: discord.Interaction,
+                 button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="ยกเลิกการลบแล้วครับ", view=None)
+
+
+class _CustDeleteSelect(discord.ui.Select):
+    def __init__(self):
+        rows = _cust_search("", 25)
+        opts = [discord.SelectOption(label=f"#{i} {n[:70]}", value=str(i))
+                for i, n, _p, _a, _nt in rows]
+        super().__init__(placeholder="เลือกลูกค้าที่จะลบ", options=opts)
+
+    async def callback(self, interaction: discord.Interaction):
+        cid = int(self.values[0])
+        name = ""
+        for i, n, _p, _a, _nt in _cust_search("", 100):
+            if i == cid:
+                name = n
+                break
+        await interaction.response.edit_message(
+            content=f"จะลบลูกค้า **#{cid} {name[:60]}** — กด **ลบเลย** "
+                    "เพื่อยืนยันครับ",
+            view=_CustDeleteConfirm(cid, name))
+
+
+class _CustPickDeleteView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.add_item(_CustDeleteSelect())
+
+
 class CustomerPanel(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=600)
@@ -1972,6 +2022,17 @@ class CustomerPanel(discord.ui.View):
         await interaction.response.defer(thinking=True)
         txt = await asyncio.to_thread(customers_map_text)
         await interaction.followup.send(txt, view=CustMapView())
+
+    @discord.ui.button(label="ลบลูกค้า", emoji="🗑️",
+                       style=discord.ButtonStyle.danger)
+    async def delete(self, interaction: discord.Interaction,
+                     button: discord.ui.Button):
+        if not _cust_search("", 1):
+            await interaction.response.send_message(
+                "📇 ยังไม่มีลูกค้าในสมุดครับ", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            view=_CustPickDeleteView(), ephemeral=True)
 
 
 @tree.command(name="customers", description="📇 สมุดลูกค้าของคุณ (ปุ่มเพิ่ม/ค้นหา/ดู)")
