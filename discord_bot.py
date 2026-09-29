@@ -1274,12 +1274,12 @@ import sys as _sys
 import tarfile as _tarfile
 import urllib.request as _ureq
 
-UPDATE_BRANCH = "arena/01a0e677-ai-assistant-status"
+UPDATE_BRANCH = "arena/01a0edff-ai-assistant-status"
 UPDATE_URL = ("https://codeload.github.com/kaoltx-beep/ai-assistant-status/"
               "tar.gz/refs/heads/" + UPDATE_BRANCH)
 SELF_PATH = os.path.abspath(__file__)
 _UPDATE_MARKER = "jarvis-self-update"
-BOT_BUILD = "build 2026-09-30 00:10 (ล้างชื่อขยะงานเก่า + ชีตโชว์เบอร์ครบ)"
+BOT_BUILD = "build 2026-09-30 00:25 (ล้างชื่อขยะงานเก่า + ชีตโชว์เบอร์ครบ)"
 
 
 def _fetch_latest_code():
