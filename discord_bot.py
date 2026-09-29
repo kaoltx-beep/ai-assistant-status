@@ -1279,7 +1279,7 @@ UPDATE_URL = ("https://codeload.github.com/kaoltx-beep/ai-assistant-status/"
               "tar.gz/refs/heads/" + UPDATE_BRANCH)
 SELF_PATH = os.path.abspath(__file__)
 _UPDATE_MARKER = "jarvis-self-update"
-BOT_BUILD = "build 2026-09-30 00:25 (ล้างชื่อขยะงานเก่า + ชีตโชว์เบอร์ครบ)"
+BOT_BUILD = "build 2026-09-30 01:35 (+JobsByDateView GPS ระยะทาง + fix self-update)"
 
 
 def _fetch_latest_code():
