@@ -1268,7 +1268,7 @@ UPDATE_URL = ("https://codeload.github.com/kaoltx-beep/ai-assistant-status/"
               "tar.gz/refs/heads/" + UPDATE_BRANCH)
 SELF_PATH = os.path.abspath(__file__)
 _UPDATE_MARKER = "jarvis-self-update"
-BOT_BUILD = "build 2026-09-29 21:30 (จับลิงก์ชีตทุกห้อง)"
+BOT_BUILD = "build 2026-09-29 21:50 (/sheetlink คำสั่งเดียวจบ)"
 
 
 def _fetch_latest_code():
@@ -3424,6 +3424,27 @@ class SheetPanel(discord.ui.View):
             ("✅ เปิดแล้วครับ — ทุกครั้งที่**ปิดงาน**ใน /job จะส่งแถวงานเข้าชีตเอง"
              if AUTO["sheet_autosync"] else "⬜ ปิดส่งอัตโนมัติแล้วครับ"),
             ephemeral=True)
+
+
+@tree.command(name="sheetlink",
+              description="🔗 เชื่อม Google Sheet — วาง URL ตอน Deploy ในคำสั่งเดียว จบ!")
+async def slash_sheetlink(interaction: discord.Interaction,
+                          url: app_commands.Range[str, 1, 400]):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    err = _sheet_set_link(str(url))
+    if err:
+        await interaction.followup.send(err, ephemeral=True)
+        return
+    try:
+        r = await asyncio.to_thread(_sheet_payload, {"action": "ping"})
+        if r.get("ok"):
+            msg = ("✅ เชื่อมสำเร็จ + 🧪 ทดสอบผ่าน! เปิดชีตดูจะมีแท็บ **log** "
+                   "และแถว ping โผล่มาครับ — ต่อไปกด 🔁 ส่งอัตโนมัติเมื่อปิดงานได้เลย")
+        else:
+            msg = f"🔗 บันทึกลิงก์แล้ว แต่ทดสอบพัง: {r.get('msg', '')[:120]}"
+    except Exception as e:
+        msg = f"🔗 บันทึกลิงก์แล้ว แต่ทดสอบไม่ผ่าน: {str(e)[:140]}"
+    await interaction.followup.send(msg, ephemeral=True)
 
 
 @tree.command(name="sheet", description="📊 เชื่อม/ส่งข้อมูลเข้า Google Sheet")
