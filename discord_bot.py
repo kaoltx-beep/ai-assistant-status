@@ -1157,7 +1157,7 @@ UPDATE_URL = ("https://codeload.github.com/kaoltx-beep/ai-assistant-status/"
               "tar.gz/refs/heads/" + UPDATE_BRANCH)
 SELF_PATH = os.path.abspath(__file__)
 _UPDATE_MARKER = "jarvis-self-update"
-BOT_BUILD = "build 2026-09-29 19:10 (ลบลูกค้า)"
+BOT_BUILD = "build 2026-09-29 19:40 (ใกล้ไปไกล+ชื่อสะอาด)"
 
 
 def _fetch_latest_code():
@@ -1872,7 +1872,33 @@ def _cust_conn():
     return conn
 
 
+_RE_CLEAN_MD = re.compile(r"[#*`_]+")
+_RE_PLACEHOLDER = re.compile(r"^ชื่อ(ม)?ลูกค้า\b|^ลูกค้า\b|^order\b|^cust(o|)mer\b", re.I)
+_RE_PHONEISH = re.compile(r"(?:\b0\d{8,9}\b\s*){1,3}")
+
+
+def _clean_cust_text(s):
+    """ตัดขยะ markdown/placeholder ออกจากชื่อ-ที่อยู่ที่ตาอ่านมา"""
+    s = _RE_CLEAN_MD.sub("", str(s or "")).strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
 def _cust_add(name, phone="", address="", note=""):
+    name = _clean_cust_text(name)
+    address = _clean_cust_text(address)
+    # ชื่อกลาง ๆ (ชื่อลูกค้า/order) หรือที่อยู่ที่เป็นแค่เบอร์โทร = ขยะ ปล่อยว่าง
+    if _RE_PLACEHOLDER.match(name) and len(name) < 40:
+        name = ""
+    if re.fullmatch(_RE_PHONEISH.pattern + r"\s*", address):
+        address = ""
+    try:
+        cols = [r[1] for r in _cust_conn().execute("PRAGMA table_info(customers)")]
+        if "coord" not in cols:
+            _cust_conn().execute(
+                "ALTER TABLE customers ADD COLUMN coord TEXT DEFAULT ''")
+    except Exception:
+        pass
     conn = _cust_conn()
     cur = conn.execute(
         "INSERT INTO customers(name,phone,address,note) VALUES(?,?,?,?)",
@@ -1881,6 +1907,27 @@ def _cust_add(name, phone="", address="", note=""):
     cid = cur.lastrowid
     conn.close()
     return cid
+
+
+def _cust_set_coord(cid, coord):
+    try:
+        conn = _cust_conn()
+        conn.execute("UPDATE customers SET coord=? WHERE id=?", (coord, cid))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _cust_get_coord(cid):
+    try:
+        conn = _cust_conn()
+        r = conn.execute("SELECT coord FROM customers WHERE id=?",
+                         (cid,)).fetchone()
+        conn.close()
+        return (r[0] or "").strip() if r else ""
+    except Exception:
+        return ""
 
 
 def _cust_search(q="", limit=20):
@@ -2054,16 +2101,81 @@ HANDS["contacts"] = hand_contacts
 # ============================================================
 # 🗺️ ลูกค้าบนแผนที่ — ปุ่มเดียว เห็นลูกค้าทั้งสมุดเป็นจุด A→B→C
 # ============================================================
+def _haversine_km(lat1, lon1, lat2, lon2):
+    """ระยะทางตรงระหว่าง 2 พิกัด (กม.)"""
+    import math as _m
+    r = 6371.0
+    p1, p2 = _m.radians(lat1), _m.radians(lat2)
+    dp, dl = _m.radians(lat2 - lat1), _m.radians(lon2 - lon1)
+    a = (_m.sin(dp / 2) ** 2 + _m.cos(p1) * _m.cos(p2)
+         * _m.sin(dl / 2) ** 2)
+    return 2 * r * _m.asin(_m.sqrt(a))
+
+
+def _current_latlon():
+    """ตำแหน่งมือถือตอนนี้ (termux-location) — ไม่ได้คืน None"""
+    try:
+        r = subprocess.run(["termux-location", "-p", "network"],
+                           capture_output=True, timeout=40)
+        d = json.loads(r.stdout.decode())
+        return float(d["latitude"]), float(d["longitude"])
+    except Exception:
+        return None
+
+
+_RE_LL = re.compile(r"(\d{1,3}\.\d{4,})[\s,]+(\d{1,3}\.\d{4,})")
+
+
+def _geo_coords(addr, cid=None):
+    """พิกัดของที่อยู่: เก็บไว้แล้ว → ฝังในข้อความ → ถาม OpenStreetMap (ฟรี)"""
+    if cid:
+        c = _cust_get_coord(cid)
+        m = re.fullmatch(r"(\d{1,3}\.\d{4,}),(\d{1,3}\.\d{4,})", c)
+        if m:
+            return c
+    m = _RE_LL.search(addr or "")
+    if m:
+        return m.group(1) + "," + m.group(2)
+    try:
+        from urllib.request import Request, urlopen
+        q = quote(addr or "")
+        req = Request(
+            "https://nominatim.openstreetmap.org/search?q=" + q
+            + "&format=json&limit=1&countrycodes=th",
+            headers={"User-Agent": "jarvis-bot-helper"})
+        data = json.loads(urlopen(req, timeout=12).read().decode())
+        if data:
+            c = data[0]["lat"] + "," + data[0]["lon"]
+            if cid:
+                _cust_set_coord(cid, c)   # จำไว้ ครั้งหน้าไม่ต้องถามใหม่
+            return c
+    except Exception as e:
+        log.info("geocode ไม่สำเร็จ: %s", str(e)[:60])
+    return None
+
+
 def customers_map_points(limit=9):
-    """ลูกค้าที่มีที่อยู่ (สูงสุด 9 จุด — Maps รับหลายจุดได้ประมาณนี้)"""
-    pts = []
+    """ลูกค้าที่มีที่อยู่พอนำทางได้ — มีตำแหน่งเรา = เรียงใกล้→ไกลอัตโนมัติ"""
     rows = list(_cust_search("", 50))
-    rows.reverse()   # เรียงตามลำดับที่เพิ่มลูกค้า (เก่า→ใหม่) ให้ตรงเลข 1,2,3 ในสมุด
-    for _cid, name, _ph, addr, _nt in rows:
-        if addr:
-            pts.append((name or "ลูกค้า", addr))
+    rows.reverse()   # ลำดับตั้งต้น = ตามที่เพิ่มลูกค้า (เก่า→ใหม่)
+    origin = None
+    pts = []
+    for cid, name, ph, addr, _nt in rows:
+        if not addr or re.fullmatch(_RE_PHONEISH.pattern + r"\s*", addr):
+            continue   # ไม่มีที่อยู่จริง (เช่น ที่อยู่เป็นแค่เบอร์) ข้าม
+        coord = _geo_coords(addr, cid)
+        dist = None
+        if origin is None:
+            origin = _current_latlon()   # ถามตำแหน่งครั้งเดียว
+        if origin and coord:
+            la, lo = coord.split(",")
+            dist = _haversine_km(origin[0], origin[1], float(la), float(lo))
+        pts.append((name or ("ลูกค้า " + str(cid)),
+                    coord or addr, addr, dist))
         if len(pts) >= limit:
             break
+    if origin and any(p[3] is not None for p in pts):
+        pts.sort(key=lambda p: (p[3] is None, p[3] if p[3] is not None else 0))
     return pts
 
 
@@ -2071,26 +2183,32 @@ def customers_map_url():
     pts = customers_map_points()
     if not pts:
         return None
+    dest = pts[-1][1]
     if len(pts) == 1:
         return ("https://www.google.com/maps/dir/?api=1&destination="
-                + _map_quote(pts[0][1]))
+                + _map_quote(dest))
     url = ("https://www.google.com/maps/dir/?api=1&travelmode=driving"
-           "&destination=" + _map_quote(pts[-1][1])
-           + "&waypoints=" + _map_quote("|".join(a for _n, a in pts[:-1])))
+           "&destination=" + _map_quote(dest)
+           + "&waypoints=" + _map_quote("|".join(p[1] for p in pts[:-1])))
     return url
 
 
 def customers_map_text():
     pts = customers_map_points()
     if not pts:
-        return ("🗺️ ยังไม่มีลูกค้าที่มีที่อยู่ในสมุดครับ — เพิ่มได้ที่ /customers "
-                "(➕ เพิ่มลูกค้า) หรือจับงานจากรูปแล้วกด 📇 บันทึกงาน+ลูกค้า")
-    lines = [f"🗺️ **ลูกค้าบนแผนที่ ({len(pts)} จุด เรียง A→B→C):**", ""]
-    for i, (name, addr) in enumerate(pts, 1):
-        pin = chr(ord("A") + i - 1) if i <= 8 else str(i)
-        lines.append(f"📍 **{pin}. {name}** — {addr[:70]}")
+        return ("🗺️ ยังไม่มีลูกค้าที่มีที่อยู่นำทางได้ในสมุดครับ\n"
+                "• เพิ่มที่ /customers (➕ ใส่ที่อยู่ให้ครบ)\n"
+                "• หรือจับงานจากรูป + พิมพ์ จับงาน → กด 📇 บันทึกงาน+ลูกค้า")
+    near = any(p[3] is not None for p in pts)
+    head = (f"🗺️ **ลูกค้าบนแผนที่ ({len(pts)} จุด) — เรียงใกล้→ไกล"
+            "จากตำแหน่งคุณตอนนี้:**" if near
+            else f"🗺️ **ลูกค้าบนแผนที่ ({len(pts)} จุด) — เรียงตามลำดับในสมุด:**")
+    lines = [head, ""]
+    for i, (name, _pt, addr, dist) in enumerate(pts, 1):
+        d = f" • ~{dist:.1f} กม." if dist is not None else ""
+        lines.append(f"📍 **{i}. {name}** — {addr[:70]}{d}")
     lines.append("")
-    lines.append("กดปุ่มด้านล่าง = Maps วางเส้นทางรอบทุกจุดให้เลยครับ 🚗")
+    lines.append("กดปุ่มด้านล่าง = Maps วางเส้นทาง 1→%d ให้เลยครับ 🚗" % len(pts))
     return "\n".join(lines)
 
 
