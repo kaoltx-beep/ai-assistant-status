@@ -1279,7 +1279,7 @@ UPDATE_URL = ("https://codeload.github.com/kaoltx-beep/ai-assistant-status/"
               "tar.gz/refs/heads/" + UPDATE_BRANCH)
 SELF_PATH = os.path.abspath(__file__)
 _UPDATE_MARKER = "jarvis-self-update"
-BOT_BUILD = "build 2026-09-29 21:55 (จำลิงก์ชีตถาวร)"
+BOT_BUILD = "build 2026-09-29 23:05 (แก้ปุ่มตั้งลิงก์ชีต)"
 
 
 def _fetch_latest_code():
@@ -3314,9 +3314,12 @@ def _sheet_set_link(u):
 
 
 class SheetURLModal(discord.ui.Modal, title="🔗 เชื่อม Google Sheet"):
+    # ⚠️ Discord จำกัด label ไว้ 45 ตัวอักษร — ยาวกว่านี้ modal จะเด้ง 400
+    #    แล้วผู้ใช้เห็นแค่ "ไม่ตอบสนอง" (เคยพังเพราะแบบนี้มาแล้ว)
     url = discord.ui.TextInput(
-        label="Web app URL (ขึ้นต้น https://script.google.com/)",
-        placeholder="วางลิงก์ที่ได้ตอน Deploy ใน Apps Script", max_length=300)
+        label="Web app URL (script.google.com/...)",
+        placeholder="https://script.google.com/macros/s/.../exec",
+        max_length=400)
 
     async def on_submit(self, interaction: discord.Interaction):
         err = _sheet_set_link(str(self.url.value))
@@ -3398,7 +3401,17 @@ class SheetPanel(discord.ui.View):
     @discord.ui.button(label="ตั้งลิงก์", emoji="🔗",
                        style=discord.ButtonStyle.success)
     async def setlink(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(SheetURLModal())
+        try:
+            await interaction.response.send_modal(SheetURLModal())
+        except Exception as e:   # modal เปิดไม่ได้ → บอกทางสำรอง ไม่ปล่อยให้เงียบ
+            log.warning("sheet modal: %s", e)
+            try:
+                await interaction.response.send_message(
+                    "เปิดฟอร์มไม่ได้ครับ — ใช้ทางสำรองแทน: พิมพ์ **/sheetlink** "
+                    "แล้ววาง URL หรือ**วางลิงก์ชีตในแชต**ตรง ๆ ก็ได้ครับ",
+                    ephemeral=True)
+            except Exception:
+                pass
 
     @discord.ui.button(label="ทดสอบ", emoji="🧪",
                        style=discord.ButtonStyle.primary)
