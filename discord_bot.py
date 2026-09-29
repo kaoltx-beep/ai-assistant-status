@@ -1133,6 +1133,7 @@ UPDATE_URL = ("https://codeload.github.com/kaoltx-beep/ai-assistant-status/"
               "tar.gz/refs/heads/" + UPDATE_BRANCH)
 SELF_PATH = os.path.abspath(__file__)
 _UPDATE_MARKER = "jarvis-self-update"
+BOT_BUILD = "build 2026-09-29 09:10 (บันทึกงาน+ลูกค้า)"
 
 
 def _fetch_latest_code():
@@ -1163,7 +1164,7 @@ def self_update():
     except Exception:
         same = False
     if same:
-        return "✅ คุณใช้เวอร์ชันล่าสุดอยู่แล้วครับ"
+        return f"✅ ใช้เวอร์ชันล่าสุดอยู่แล้วครับ ({BOT_BUILD})"
     tmp = SELF_PATH + ".new"
     with open(tmp, "wb") as f:
         f.write(data)
@@ -1181,7 +1182,7 @@ def self_update():
     except Exception:
         pass
     os.replace(tmp, SELF_PATH)
-    return "🔄 อัปเดตเสร็จแล้ว — กำลังรีสตาร์ท..."
+    return f"🔄 อัปเดตเสร็จแล้ว ({BOT_BUILD}) — กำลังรีสตาร์ท..."
 
 
 def restart_bot():
