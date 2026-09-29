@@ -1268,7 +1268,7 @@ UPDATE_URL = ("https://codeload.github.com/kaoltx-beep/ai-assistant-status/"
               "tar.gz/refs/heads/" + UPDATE_BRANCH)
 SELF_PATH = os.path.abspath(__file__)
 _UPDATE_MARKER = "jarvis-self-update"
-BOT_BUILD = "build 2026-09-29 21:05 (แก้ชีต redirect)"
+BOT_BUILD = "build 2026-09-29 21:30 (จับลิงก์ชีตทุกห้อง)"
 
 
 def _fetch_latest_code():
@@ -3890,6 +3890,16 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
+    # 🔗 ลิงก์ชีตจับได้ทุกห้อง (ไม่ต้องแท็ก) — รูปแบบเจาะจง ไม่รบกวนคนอื่น
+    m_sheet0 = re.search(
+        r"https://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec",
+        message.content or "")
+    if m_sheet0:
+        await message.channel.send(
+            "🔗 เจอลิงก์ Google Sheet — **เชื่อมกับ Jarvis เลยไหมครับ?** "
+            "กดปุ่มเดียวจบ", view=SheetLinkConfirm(m_sheet0.group(0)))
+        return
+
     is_dm = isinstance(message.channel, discord.DMChannel)
     mentioned = bot.user in (message.mentions or [])
     if not (is_dm or mentioned):
@@ -3897,14 +3907,6 @@ async def on_message(message: discord.Message):
 
     _last_channel_id = message.channel.id
     text = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
-
-    # 🔗 วางลิงก์ Google Sheet ในแชต = ถามยืนยันตั้งลิงก์ (1 ปุ่มจบ)
-    m_sheet = re.search(r"https://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec", text)
-    if m_sheet:
-        await message.channel.send(
-            "🔗 เจอลิงก์ Google Sheet — **เชื่อมกับ Jarvis เลยไหมครับ?** "
-            "กดปุ่มเดียวจบ", view=SheetLinkConfirm(m_sheet.group(0)))
-        return
 
     # 👀 เก็บรูปที่แนบมาด้วย (สูงสุด 2 รูป)
     images = []
