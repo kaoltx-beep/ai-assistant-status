@@ -1157,7 +1157,7 @@ UPDATE_URL = ("https://codeload.github.com/kaoltx-beep/ai-assistant-status/"
               "tar.gz/refs/heads/" + UPDATE_BRANCH)
 SELF_PATH = os.path.abspath(__file__)
 _UPDATE_MARKER = "jarvis-self-update"
-BOT_BUILD = "build 2026-09-29 09:35 (ลูกค้าบนแผนที่)"
+BOT_BUILD = "build 2026-09-29 09:50 (ชื่อ-พิกัดแยกถูก)"
 
 
 def _fetch_latest_code():
@@ -1319,7 +1319,12 @@ def _parse_job_text(text):
                 f = fv
                 break
         if f and i + 1 < len(lines) and not data[f]:
-            data[f] = lines[i + 1][:300]
+            v = lines[i + 1][:300]
+            if f == "customer" and re.fullmatch(
+                    r"\s*\d{1,3}\.\d{3,}\s*,?\s*\d{1,3}\.\d{3,}\s*", v):
+                ex.setdefault("พิกัด", re.sub(r"\s+", "", v))
+                continue   # พิกัด GPS ไม่ใช่ชื่อคน — เก็บเป็นพิกัดแล้วหาชื่อต่อ
+            data[f] = v
 
     # 4) วันเวลานัดหมาย เช่น "29/09/2026 09:00-12:00"
     if not ex.get("เวลา"):
@@ -1369,7 +1374,12 @@ def _parse_job_text(text):
                 break
         if not data["customer"]:
             first = lines[0] if lines else ""
-            data["customer"] = re.sub(r"^\d+\.\s*", "", first)[:80]
+            if (first and not re.match(skip_re, first.strip())
+                    and not re.match(r"^\d{1,2}/\d{1,2}/\d{2,4}\b", first)
+                    and not re.fullmatch(
+                        r"\s*\d{1,3}\.\d{3,}\s*,?\s*\d{1,3}\.\d{3,}\s*",
+                        first)):
+                data["customer"] = re.sub(r"^\d+\.\s*", "", first)[:80]
     return data
 
 
