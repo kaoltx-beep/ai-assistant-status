@@ -292,6 +292,97 @@ HANDS["torch"] = hand_torch
 HANDS["camera"] = hand_camera
 HANDS["location"] = hand_location
 
+# ---------- 📳 คุมเครื่องระดับระบบ (ไม่ใช้ Accessibility) ----------
+def hand_vibrate(text=""):
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(วิ|วินาที|s\b)?", text)
+    ms = int(float(m.group(1)) * 1000) if m else 800
+    try:
+        subprocess.run(["termux-vibrate", "-d", str(ms)],
+                       capture_output=True, timeout=15)
+        return f"📳 สั่นให้ {ms/1000:g} วินาทีแล้วครับ"
+    except FileNotFoundError:
+        return "❌ ต้องติดตั้งแอป Termux:API ก่อนนะครับ"
+    except Exception as e:
+        return f"❌ สั่นไม่สำเร็จ: {str(e)[:80]}"
+
+
+def hand_wifi(text=""):
+    # กับดักไทย: "เปิด" ⊃ "ปิด" — ลบ "เปิด" ออกก่อน แล้วค่อยหา "ปิด"
+    on = not re.search(r"ปิด\s*(ไวไฟ|วายฟาย|wifi|wi-?fi)", text.replace("เปิด", " "))
+    try:
+        r = subprocess.run(["termux-wifi-enable", "true" if on else "false"],
+                           capture_output=True, timeout=20)
+        if r.returncode == 0:
+            return ("📶 เปิด WiFi แล้วครับ" if on else "📴 ปิด WiFi แล้วครับ")
+        raise RuntimeError("rc=" + str(r.returncode))
+    except Exception:
+        try:
+            subprocess.run(["am", "start", "-a",
+                            "android.settings.WIFI_SETTINGS"],
+                           capture_output=True, timeout=15)
+            return ("📶 เปิดหน้าตั้งค่า WiFi ให้แล้ว — กดสวิตช์เองอีกทีนะครับ "
+                    "(เครื่องนี้สั่งเปิด-ปิดตรง ๆ ไม่ได้)")
+        except Exception as e:
+            return f"❌ คุม WiFi ไม่สำเร็จ: {str(e)[:80]}"
+
+
+def hand_speak(text=""):
+    msg = re.sub(r"^(พูดว่า|พูด|บอกว่า|ประกาศว่า)\s*", " ", text.strip()).strip()
+    if not msg:
+        return "พิมพ์แบบนี้ครับ: พูดว่า ถึงเวลากินข้าวแล้ว"
+    try:
+        subprocess.run(["termux-tts-speak", msg[:200]],
+                       capture_output=True, timeout=30)
+        return f"🗣️ ให้เครื่องพูดว่า: {msg[:120]}"
+    except FileNotFoundError:
+        return "❌ ต้องติดตั้งแอป Termux:API ก่อนนะครับ"
+    except Exception as e:
+        return f"❌ พูดไม่ออก: {str(e)[:80]}"
+
+
+def hand_clip(text=""):
+    msg = re.sub(r"^(คัดลอก|คัป|copy)\s*", " ", text.strip()).strip()
+    if not msg:
+        return "พิมพ์แบบนี้ครับ: คัดลอก 0812345678"
+    try:
+        subprocess.run(["termux-clipboard-set", msg[:500]],
+                       capture_output=True, timeout=15)
+        return f"📋 คัดลอกใส่คลิปบอร์ดแล้ว: {msg[:80]}"
+    except FileNotFoundError:
+        return "❌ ต้องติดตั้งแอป Termux:API ก่อนนะครับ"
+    except Exception as e:
+        return f"❌ คัดลอกไม่ได้: {str(e)[:80]}"
+
+
+def hand_toast(text=""):
+    msg = re.sub(r"^(โชว์บนจอ|แสดงบนจอ|แจ้งเตือนบนจอ)\s*", " ",
+                 text.strip()).strip()
+    if not msg:
+        return "พิมพ์แบบนี้ครับ: โชว์บนจอ เก็บงานแล้วกลับบ้าน"
+    try:
+        subprocess.run(["termux-toast", msg[:150]],
+                       capture_output=True, timeout=15)
+        return f"🔔 โชว์บนจอมือถือแล้ว: {msg[:80]}"
+    except FileNotFoundError:
+        return "❌ ต้องติดตั้งแอป Termux:API ก่อนนะครับ"
+    except Exception as e:
+        return f"❌ โชว์ไม่ได้: {str(e)[:80]}"
+
+
+def _stt_listen():
+    r = subprocess.run(["termux-speech-to-text"], capture_output=True,
+                       timeout=60)
+    return (r.stdout.decode(errors="ignore") or "").strip()
+
+
+HANDS["vibrate"] = hand_vibrate
+HANDS["wifi"] = hand_wifi
+HANDS["speak"] = hand_speak
+HANDS["clip"] = hand_clip
+HANDS["toast"] = hand_toast
+HANDS["voicecmd"] = lambda t: ("🎙️ พิมพ์ **ฟังคำสั่ง** แล้วพูดใส่ไมค์เครื่องได้เลยครับ "
+                               "(เช่น พูดว่า เปิดไฟฉาย) — Jarvis จะทำตามที่ได้ยิน")
+
 HANDS["weather"] = hand_weather
 HANDS["rates"] = hand_rates
 HANDS["random"] = hand_random
@@ -465,6 +556,13 @@ SYSTEM_PROMPT = """คุณคือ Jarvis AI ผู้ช่วยส่ว�
 - "map"           : Google Maps — action_text เช่น "นำทางไป<ชื่อลูกค้า>", "หา ปั๊ม ใกล้ฉัน", "แผนที่<สถานที่>"
 - "today"         : งานวันนี้ — ลิสต์งานที่มีเวลานัดวันนี้เรียงตามเวลา + ปุ่มเส้นทาง Maps (คำเช่น "งานวันนี้", "ตารางวันนี้")
 - "custmap"       : ลูกค้าทั้งสมุดบนแผนที่ A→B→C (คำเช่น "แผนที่ลูกค้า", "ลูกค้าบนแผนที่")
+- "stock"         : สต็อกอุปกรณ์ — ดูคงเหลือ/แนะนำปุ่มรับ-เบิก (คำเช่น "สต็อก", "เบิกของ", "ของคงเหลือ")
+- "speak"         : ให้เครื่องพูดออกลำโพง — "พูดว่า <ข้อความ>"
+- "clip"          : คัดลอกข้อความใส่คลิปบอร์ดเครื่อง — "คัดลอก <ข้อความ>"
+- "vibrate"       : สั่นเครื่อง — "สั่น" / "สั่น 2 วินาที"
+- "wifi"          : เปิด/ปิด WiFi — "เปิดไวไฟ" / "ปิดไวไฟ" (ถ้าสั่งตรงไม่ได้จะเปิดหน้าตั้งค่าให้)
+- "toast"         : โชว์ข้อความเด้งบนจอมือถือ — "โชว์บนจอ <ข้อความ>"
+- "voicecmd"      : สั่งงานด้วยเสียงจริง — "ฟังคำสั่ง" แล้วพูดใส่ไมค์ (เครื่องแปลงเสียงเป็นคำสั่ง)
 - "sheet_push"    : ส่งข้อมูลเข้า Google Sheet — action_text "งาน" หรือ "ลูกค้า"
 - "daily_report"  : สรุปงานวันนี้/รายงานงาน — สรุปงานที่ปิดวันนี้ ระยะสายรวม และงานค้าง
 - "brightness"     : ปรับความสว่างจอ — action_text เช่น "สว่างสุด", "หรี่จอ", "50%"
@@ -567,6 +665,8 @@ def fallback_intent(text):
         return "volume", text
     if any(k in t for k in ("หาเบอร์", "เบอร์ของ", "สมุดโทรศัพท์", "รายชื่อในเครื่อง")):
         return "contacts", text
+    if re.search(r"(เปิด|ปิด)\s*(ไวไฟ|วายฟาย|wifi|wi-?fi)", t) and len(t) < 50:
+        return "wifi", text   # เปิด/ปิด wifi ต้องมาก่อนกฎเช็คเน็ต
     if any(k in t for k in ("เน็ต", "สัญญาณ", "wifi", "ไวไฟ", "ping", "อินเทอร์เน็ต")) \
             and len(t) < 50 and "เน็ตฟลิก" not in t:
         return "net", text
@@ -575,6 +675,17 @@ def fallback_intent(text):
     if any(k in t for k in ("แผนที่ลูกค้า", "ลูกค้าบนแผนที่",
                             "ลูกค้าทั้งหมดบนแผนที่")) and len(t) < 50:
         return "custmap", ""
+    if any(k in t for k in ("สต็อก", "รับของ", "เบิกของ", "ของคงเหลือ",
+                            "เหลือของไหม")) and len(t) < 50:
+        return "stock", ""
+    if re.search(r"พูดว่า|บอกว่า|ประกาศว่า", t) and len(t) < 200:
+        return "speak", text
+    if re.search(r"^(คัดลอก|คัป|copy)\b", t) and len(t) < 300:
+        return "clip", text
+    if re.match(r"^สั่น(เครื่อง|มือถือ|โทรศัพท์|หน่อย|ด้วย)?\s*\d*\s*(วิ|วินาที)?\s*$", t):
+        return "vibrate", text
+    if re.search(r"(โชว์บนจอ|แสดงบนจอ|แจ้งเตือนบนจอ)", t) and len(t) < 200:
+        return "toast", text
     is_map = any(k in t for k in ("นำทาง", "เอาทาง", "แผนที่", "แมพ")) or \
         bool(re.search(r"ไป\s*\S+\s*ยังไง", t)) or \
         bool(re.search(r"ใกล้(ฉัน|เรา|ที่นี่)", t) and len(t) < 60)
@@ -1157,7 +1268,7 @@ UPDATE_URL = ("https://codeload.github.com/kaoltx-beep/ai-assistant-status/"
               "tar.gz/refs/heads/" + UPDATE_BRANCH)
 SELF_PATH = os.path.abspath(__file__)
 _UPDATE_MARKER = "jarvis-self-update"
-BOT_BUILD = "build 2026-09-29 19:40 (ใกล้ไปไกล+ชื่อสะอาด)"
+BOT_BUILD = "build 2026-09-29 20:40 (คุมเครื่อง+สต็อก)"
 
 
 def _fetch_latest_code():
@@ -2096,6 +2207,133 @@ HANDS["timer"] = hand_timer
 HANDS["calc"] = hand_calc
 HANDS["net"] = hand_net
 HANDS["contacts"] = hand_contacts
+
+
+# ============================================================
+# 📦 สต็อกอุปกรณ์ — รับของ/เบิกของ/เช็คคงเหลือ (เก็บใน stock.db)
+# ============================================================
+STOCK_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stock.db")
+
+
+def _stock_conn():
+    conn = _sqlite3.connect(STOCK_DB)
+    conn.execute("""CREATE TABLE IF NOT EXISTS stock(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE, qty REAL DEFAULT 0, unit TEXT DEFAULT '')""")
+    return conn
+
+
+def _stock_add(name, qty, unit=""):
+    name = _clean_cust_text(name)[:60]
+    conn = _stock_conn()
+    conn.execute("""INSERT INTO stock(name,qty,unit) VALUES(?,?,?)
+        ON CONFLICT(name) DO UPDATE SET qty=qty+excluded.qty,
+        unit=excluded.unit""", (name, float(qty), unit.strip()[:12]))
+    conn.commit()
+    conn.close()
+
+
+def _stock_take(name, qty):
+    name = _clean_cust_text(name)[:60]
+    conn = _stock_conn()
+    r = conn.execute("SELECT qty FROM stock WHERE name=?", (name,)).fetchone()
+    if not r:
+        conn.close()
+        return None
+    left = max(0.0, float(r[0]) - float(qty))
+    conn.execute("UPDATE stock SET qty=? WHERE name=?", (left, name))
+    conn.commit()
+    conn.close()
+    return left
+
+
+def _stock_list():
+    conn = _stock_conn()
+    rows = conn.execute(
+        "SELECT name,qty,unit FROM stock ORDER BY name LIMIT 50").fetchall()
+    conn.close()
+    return rows
+
+
+def hand_stock(text=""):
+    rows = _stock_list()
+    if not rows:
+        return ("📦 ยังไม่มีรายการสต็อกครับ — พิมพ์ /stock แล้วกด ➕ รับของ "
+                "(เช่น สายไฟเบอร์ 500 เมตร, ONU 10 ตัว)")
+    lines = ["📦 **สต็อกคงเหลือ:**", ""]
+    for n, q, u in rows:
+        low = " ⚠️ใกล้หมด" if float(q) <= 2 else ""
+        lines.append(f"• {n}: **{q:g}** {u}{low}")
+    lines.append("")
+    lines.append("เบิก/รับเพิ่มที่ /stock ครับ")
+    return "\n".join(lines)
+
+
+HANDS["stock"] = lambda t: hand_stock(t)
+
+
+class StockAddModal(discord.ui.Modal, title="📦 รับของเข้าสต็อก"):
+    name = discord.ui.TextInput(label="ชื่ออุปกรณ์",
+                                placeholder="เช่น สายไฟเบอร์ / ONU / หัวทีว", max_length=60)
+    qty = discord.ui.TextInput(label="จำนวนที่รับ", placeholder="เช่น 500", max_length=12)
+    unit = discord.ui.TextInput(label="หน่วย (เมตร/ตัว/กล่อง)", required=False, max_length=12)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            q = float(str(self.qty.value).replace(",", ""))
+        except ValueError:
+            await interaction.response.send_message("❌ จำนวนต้องเป็นตัวเลขครับ", ephemeral=True)
+            return
+        await asyncio.to_thread(_stock_add, str(self.name.value), q, str(self.unit.value))
+        await interaction.response.send_message(
+            f"📦 รับ **{self.name.value}** +{q:g} {self.unit.value} เข้าสต็อกแล้วครับ",
+            ephemeral=True)
+
+
+class StockTakeModal(discord.ui.Modal, title="📤 เบิกของออกจากสต็อก"):
+    name = discord.ui.TextInput(label="ชื่ออุปกรณ์", max_length=60)
+    qty = discord.ui.TextInput(label="จำนวนที่เบิก", placeholder="เช่น 2", max_length=12)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            q = float(str(self.qty.value).replace(",", ""))
+        except ValueError:
+            await interaction.response.send_message("❌ จำนวนต้องเป็นตัวเลขครับ", ephemeral=True)
+            return
+        left = await asyncio.to_thread(_stock_take, str(self.name.value), q)
+        if left is None:
+            await interaction.response.send_message(
+                f"❌ ไม่มี '{self.name.value}' ในสต็อกครับ (เช็คชื่อที่ 📋)", ephemeral=True)
+            return
+        warn = "\n⚠️ **ใกล้หมดแล้วนะครับ ไปซื้อเพิ่ม!**" if left <= 2 else ""
+        await interaction.response.send_message(
+            f"📤 เบิก **{self.name.value}** {q:g} ออกแล้ว — คงเหลือ **{left:g}**{warn}",
+            ephemeral=True)
+
+
+class StockPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    @discord.ui.button(label="รับของ", emoji="➕",
+                       style=discord.ButtonStyle.success)
+    async def add(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(StockAddModal())
+
+    @discord.ui.button(label="เบิกของ", emoji="📤",
+                       style=discord.ButtonStyle.primary)
+    async def take(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(StockTakeModal())
+
+    @discord.ui.button(label="ดูสต็อก", emoji="📋")
+    async def view_(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(hand_stock()[:1900], ephemeral=True)
+
+
+@tree.command(name="stock", description="📦 สต็อกอุปกรณ์ — รับ/เบิก/เช็คคงเหลือ")
+async def slash_stock(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "📦 **สต็อกอุปกรณ์** — กดปุ่มเลยครับ", view=StockPanel(), ephemeral=True)
 
 
 # ============================================================
@@ -3431,6 +3669,8 @@ async def slash_help(interaction: discord.Interaction):
         "• Google Maps: นำทางไป<ลูกค้า> • หา ปั๊ม ใกล้ฉัน • /map สถานที่\n"
         "• 📅 งานวันนี้: /today — เห็นงานเรียงตามเวลา + ปุ่มเส้นทาง A→B→C ทั้งวัน\n"
         "• 🗺️ ลูกค้าบนแผนที่: /custmap หรือปุ่มใน /customers — พาไล่เยี่ยมทุกจุด A→B→C\n"
+        "• 📦 สต็อกอุปกรณ์: /stock — รับของ/เบิกของ/เตือนใกล้หมด\n"
+        "• 📳 คุมเครื่อง: สั่น • เปิด/ปิดไวไฟ • พูดว่า... • คัดลอก... • โชว์บนจอ... • ฟังคำสั่ง (สั่งเสียง)\n"
         "• 📸 จับงานจากรูป: แนบรูป Order Detail + พิมพ์ จับงาน — ถามยืนยันก่อนบันทึก\n\n"
         "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /apps /customers /job /note /report /auto /setkey /update /help",
         ephemeral=True)
@@ -3663,6 +3903,26 @@ async def on_message(message: discord.Message):
         await message.channel.send(
             "🛑 **ห้ามรันคำสั่งแบบนี้ครับ!** ถ้าเอาไปรันใน Termux อาจลบของใหม่ทั้งหมดหาย\n"
             "ของ Jarvis อัปเดตด้วยคำเดียวเท่านั้น — พิมพ์ **/update** ในแชตนี้ได้เลยครับ ✅")
+        return
+
+    # 🎙️ สั่งงานด้วยเสียงจริงจากมือถือ (termux-speech-to-text)
+    if re.search(r"ฟังคำสั่ง|สั่งด้วยเสียง|พูดสั่งงาน", text, re.I):
+        await message.channel.send("🎙️ พูดเลยครับ... (ฟัง 5-10 วิ)")
+        try:
+            heard = await asyncio.to_thread(_stt_listen)
+        except Exception as e:
+            await message.channel.send("❌ " + str(e)[:140])
+            return
+        if not heard:
+            await message.channel.send("ไม่ได้ยินอะไรเลยครับ ลองใหม่อีกทีนะครับ 🙏")
+            return
+        await message.channel.send(f"🎙️ ได้ยินว่า: **{heard[:120]}**")
+        async with message.channel.typing():
+            reply, want_voice, attach = await process_message(
+                heard, message.channel.id, None)
+        await reply_long(message.channel, reply)
+        if want_voice and VOICE_ENABLED.get(message.channel.id, True):
+            await speak_and_note(reply, message.channel.id, message.channel)
         return
 
     # 📸 รูป Order Detail → จับเป็นงาน (ชัดเจน: แนบรูป + พิมพ์จับงาน)
