@@ -448,6 +448,8 @@ SYSTEM_PROMPT = """คุณคือ Jarvis AI ผู้ช่วยส่ว�
 - สุภาพและจริงใจ ลงท้ายด้วย "ครับ" ทุกประโยค
 - ห้ามใช้คำว่า "ค่ะ" หรือ "คะ" เด็ดขาด
 - ห้ามขึ้นต้นด้วยคำว่า "คำตอบ:" หรือ "Response:" เด็ดขาด
+- ห้ามพูดว่า "ทำแล้ว/สำเร็จ/เรียบร้อย" กับสิ่งที่คุณไม่ได้ทำจริงเด็ดขาด — คุณทำได้เฉพาะผ่าน field "action" เท่านั้น ถ้าทำไม่ได้ให้บอกตรง ๆ ว่าทำไม่ได้
+- ห้ามแนะนำ/สอน/แต่งคำสั่ง terminal ทุกชนิด (curl, wget, bash, sh, pip, git) ให้ผู้ใช้รันเด็ดขาด — ถ้าผู้ใช้ถามเรื่องแก้บอท/อัปเดต/ดาวน์โหลด ให้ตอบสั้น ๆ ว่า "พิมพ์ /update ในแชตครับ" เท่านั้น
 
 มือที่คุณสั่งได้ (ตอบ field "action"):
 - "check_battery" : ถามแบตมือถือ (แบตเหลือเท่าไหร่)
@@ -3199,6 +3201,115 @@ async def on_ready():
              bot.user, ", ".join(sorted(HANDS)) or "โหมดคุยอย่างเดียว")
 
 
+# ============================================================
+# 📸 จับงานจากรูป Order Detail — แนบรูปยาว + พิมพ์ "จับงาน" = ได้งานในระบบ
+# ============================================================
+_JOB_CAPTURE_Q = ("รูปนี้เป็นหน้า Order Detail ของงานโทรคมนาคม "
+                  "ถอดข้อความทั้งหมดเป็นข้อความธรรมดา "
+                  "รักษาป้ายกำกับและค่าของทุกบรรทัดให้เหมือนเดิม "
+                  "อย่าสรุป อย่าข้าม — ตัวเลข/เบอร์โทร/ที่อยู่/พิกัดต้องเป๊ะ")
+
+
+def _job_capture_from_ocr(img_bytes, content_type="image/jpeg"):
+    """อ่านรูปด้วยตา → แยกเป็นงาน — คืน (job_dict|None, ข้อความที่อ่านได้)"""
+    ocr = ocr_image(img_bytes, content_type, _JOB_CAPTURE_Q) or ""
+    d = _parse_job_text(ocr)
+    ok = bool(d and (d.get("customer") or d.get("address") or d.get("phone")))
+    return (d if ok else None), ocr
+
+
+def _job_preview(j):
+    lines = ["📸 อ่านรูปงานได้แล้ว — เช็คความถูกต้องก่อนกดบันทึกนะครับ:", ""]
+    if j.get("jtype"):
+        lines.append("🔧 ประเภท: " + str(j["jtype"]))
+    if j.get("customer"):
+        lines.append("👤 ลูกค้า: " + str(j["customer"]))
+    if j.get("address"):
+        lines.append("🏠 ที่อยู่: " + str(j["address"]))
+    if j.get("phone"):
+        lines.append("📞 เบอร์: " + str(j["phone"]))
+    if j.get("circuit"):
+        lines.append("🔌 วงจร/อ้างอิง: " + str(j["circuit"]))
+    ex = j.get("extra") or {}
+    when = ex.get("วันเวลา") or ex.get("เวลา")
+    if when:
+        lines.append("🗓️ เวลานัด: " + str(when))
+    if ex.get("พิกัด"):
+        lines.append("📍 พิกัด: " + str(ex["พิกัด"]))
+    lines += ["", "บันทึกเข้าระบบงานเลยไหมครับ?"]
+    return "\n".join(lines)
+
+
+class JobImgConfirm(discord.ui.View):
+    def __init__(self, d):
+        super().__init__(timeout=600)
+        self.d = d
+
+    @discord.ui.button(label="บันทึกเป็นงาน", emoji="✅",
+                       style=discord.ButtonStyle.success)
+    async def yes(self, interaction: discord.Interaction,
+                  button: discord.ui.Button):
+        jid = await asyncio.to_thread(_jobs_add, self.d)
+        await interaction.response.edit_message(
+            content=f"✅ บันทึกเป็นงาน **#{jid}** แล้วครับ! ดูทั้งหมดที่ /job "
+                    "— ถ้าเป็นงานวันนี้ก็จะขึ้นใน /today ด้วย",
+            view=None)
+
+    @discord.ui.button(label="ยกเลิก", emoji="❌",
+                       style=discord.ButtonStyle.secondary)
+    async def no(self, interaction: discord.Interaction,
+                 button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="ไม่บันทึกครับ 👌", view=None)
+
+
+class JobImgChoice(discord.ui.View):
+    """แนบรูปมาเฉย ๆ ไม่บอกว่าจะทำอะไร → ถามด้วยปุ่ม"""
+
+    def __init__(self, img):
+        super().__init__(timeout=600)
+        self.img = img  # (bytes, content_type)
+
+    async def _read(self, interaction, as_job):
+        await interaction.response.edit_message(
+            content="👀 กำลังอ่านรูป... (รูปยาวใช้เวลา 10-20 วิ ห้ามพิมพ์ซ้ำนะครับ)",
+            view=None)
+        try:
+            if as_job:
+                d, ocr = await asyncio.to_thread(_job_capture_from_ocr, *self.img)
+            else:
+                d, ocr = None, await asyncio.to_thread(ocr_image, *self.img)
+        except Exception as e:
+            try:
+                await interaction.followup.send("❌ " + str(e)[:200])
+            except Exception:
+                pass
+            return
+        if d:
+            await interaction.followup.send(_job_preview(d),
+                                            view=JobImgConfirm(d))
+        elif as_job:
+            await interaction.followup.send(
+                "อ่านรูปออกแต่หาข้อมูลงานไม่เจอชัด ๆ ครับ 😥\n"
+                "1) ลองแนบรูป + พิมพ์ **จับงาน** อีกรอบ (รูปต้องเห็นชื่อ/ที่อยู่/เบอร์)\n"
+                "2) หรือก๊อปข้อความใน Order Detail มาวางใน /job ตรง ๆ\n"
+                "\nข้อความที่อ่านได้:\n" + (ocr or "")[:600])
+        else:
+            await interaction.followup.send(ocr or "อ่านรูปไม่ออกครับ")
+
+    @discord.ui.button(label="จับเป็นงาน", emoji="📥",
+                       style=discord.ButtonStyle.success)
+    async def job(self, interaction: discord.Interaction,
+                  button: discord.ui.Button):
+        await self._read(interaction, True)
+
+    @discord.ui.button(label="อ่าน/บรรยายรูป", emoji="👀",
+                       style=discord.ButtonStyle.secondary)
+    async def read(self, interaction: discord.Interaction,
+                   button: discord.ui.Button):
+        await self._read(interaction, False)
+
+
 @bot.event
 async def on_message(message: discord.Message):
     global _last_channel_id
@@ -3232,6 +3343,38 @@ async def on_message(message: discord.Message):
                 log.warning("โหลดรูปแนบไม่ได้: %s", e)
     if not text and not images:
         text = "สวัสดี"
+
+    # 🛑 คำสั่ง terminal ในแชต = ห้ามเด็ดขาด (ป้องกันสคริปต์เก่า/อันตราย)
+    if re.search(r"\b(curl|wget)\b[^\n]*\.sh|\bbash\s+\S*\.sh\b|\|\s*bash\b|\bsudo\b",
+                 text, re.I):
+        await message.channel.send(
+            "🛑 **ห้ามรันคำสั่งแบบนี้ครับ!** ถ้าเอาไปรันใน Termux อาจลบของใหม่ทั้งหมดหาย\n"
+            "ของ Jarvis อัปเดตด้วยคำเดียวเท่านั้น — พิมพ์ **/update** ในแชตนี้ได้เลยครับ ✅")
+        return
+
+    # 📸 รูป Order Detail → จับเป็นงาน (ชัดเจน: แนบรูป + พิมพ์จับงาน)
+    if images and re.search(r"จับงาน|เพิ่มงาน|บันทึกงาน|ทำเป็นงาน|order\s*detail",
+                            text, re.I):
+        await message.channel.send("👀 กำลังอ่านรูปงาน... (รูปยาวใช้ 10-20 วิ)")
+        try:
+            d, ocr = await asyncio.to_thread(_job_capture_from_ocr, *images[0])
+        except Exception as e:
+            await message.channel.send("❌ " + str(e)[:200])
+            return
+        if d:
+            await message.channel.send(_job_preview(d), view=JobImgConfirm(d))
+        else:
+            await message.channel.send(
+                "อ่านรูปออกแต่หาข้อมูลงานไม่เจอชัด ๆ ครับ 😥 ลองแนบรูปใหม่ที่เห็น"
+                "ชื่อ/ที่อยู่/เบอร์ หรือก๊อปข้อความมาวางใน /job\n\nข้อความที่อ่านได้:\n"
+                + (ocr or "")[:600])
+        return
+
+    # 📸 แนบรูปมาเฉย ๆ → ถามด้วยปุ่ม (กำกวมต้องถามเสมอ)
+    if images and not text:
+        await message.channel.send("รูปนี้จะให้ Jarvis ทำอะไรครับ?",
+                                   view=JobImgChoice(images[0]))
+        return
 
     # 🎛️ คำสั่งกำกวม → โชว์ปุ่มให้เลือกเอง
     if text and not images:
