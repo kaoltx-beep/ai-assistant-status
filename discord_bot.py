@@ -1279,7 +1279,7 @@ UPDATE_URL = ("https://codeload.github.com/kaoltx-beep/ai-assistant-status/"
               "tar.gz/refs/heads/" + UPDATE_BRANCH)
 SELF_PATH = os.path.abspath(__file__)
 _UPDATE_MARKER = "jarvis-self-update"
-BOT_BUILD = "build 2026-09-29 23:40 (ชื่องานชัด + ระยะทางจากคุณ)"
+BOT_BUILD = "build 2026-09-30 00:10 (ล้างชื่อขยะงานเก่า + ชีตโชว์เบอร์ครบ)"
 
 
 def _fetch_latest_code():
@@ -1448,6 +1448,9 @@ def _parse_job_text(text):
                 break
         if f and i + 1 < len(lines) and not data[f]:
             v = lines[i + 1][:300]
+            if f == "address" and re.fullmatch(r"\s*0\d{8,9}\s*", v):
+                data["phone"] = data["phone"] or v.strip()
+                continue   # ใต้ป้าย "ที่อยู่" ดันเป็นเบอร์โทร — ไม่ใช่ที่อยู่
             if f == "customer" and re.fullmatch(
                     r"\s*\d{1,3}\.\d{3,}\s*,?\s*\d{1,3}\.\d{3,}\s*", v):
                 ex.setdefault("พิกัด", re.sub(r"\s+", "", v))
@@ -1584,6 +1587,45 @@ def _job_dist_text(j, origin=None):
     if d is None:
         return ""
     return f"📍 ห่างจากคุณ ~{d:.1f} กม. (เส้นตรง)"
+
+
+_JUNK_NAME_RE = re.compile(
+    r"^(ข้อมูล|รายละเอียด|order|detail|customer|ชื่อ|ลูกค้า|ที่อยู่|เบอร์)", re.I)
+
+
+def _jobs_fix_legacy():
+    """ล้างงานเก่าที่ชื่อลูกค้าเป็นขยะ ('#### ข้อมูลของ order', พิกัด) และ
+    ที่อยู่ที่จริง ๆ เป็นเบอร์โทร — รันตอนบูตครั้งเดียว ปลอดภัย รันซ้ำได้"""
+    fixed = 0
+    try:
+        for j in _jobs_all(1000):
+            upd = {}
+            ex = dict(j.get("extra") or {})
+            name = re.sub(r"^[ \t]*#{1,6}[ \t]*", "", j.get("customer") or "")
+            name = re.sub(r"\*\*|__|`", "", name).strip()
+            mco = re.fullmatch(r"(\d{1,3}\.\d{3,})\s*,?\s*(\d{1,3}\.\d{3,})", name)
+            if mco:
+                ex.setdefault("พิกัด", mco.group(1) + "," + mco.group(2))
+                name = ""
+            elif _JUNK_NAME_RE.match(name):
+                name = ""
+            if name != (j.get("customer") or ""):
+                upd["customer"] = name
+            addr = (j.get("address") or "").strip()
+            if addr and re.fullmatch(r"0\d{8,9}", addr):
+                if not (j.get("phone") or "").strip():
+                    upd["phone"] = addr
+                upd["address"] = ""
+            if ex != (j.get("extra") or {}):
+                upd["extra"] = _json.dumps(ex, ensure_ascii=False)
+            if upd:
+                _jobs_update(j["id"], **upd)
+                fixed += 1
+    except Exception as e:
+        log.warning("jobs fix legacy: %s", e)
+    if fixed:
+        log.info("ล้างข้อมูลงานเก่า %d งาน", fixed)
+    return fixed
 
 
 _JOB_COLS = ("id,customer,jtype,address,phone,circuit,start_len,end_len,"
@@ -1803,7 +1845,8 @@ class _JobSelect(discord.ui.Select):
                     await asyncio.to_thread(_sheet_payload, {
                         "action": "append", "sheet": "งาน", "row": [
                             j.get("id"), "ปิดแล้ว", j.get("customer"), j.get("jtype"),
-                            j.get("address"), j.get("phone"), j.get("circuit"),
+                            j.get("address"), "'" + str(j.get("phone") or ""),
+                            j.get("circuit"),
                             j.get("start_len"), j.get("end_len"), j.get("total_len"),
                             j.get("created_at"), j.get("closed_at")]})
                 except Exception as e:
@@ -3357,9 +3400,14 @@ def sheet_sync_jobs():
     jobs = _jobs_all(500)
     head = ["#", "สถานะ", "ชื่อลูกค้า", "ประเภทงาน", "ที่อยู่", "เบอร์",
             "Circuit", "ระยะเริ่ม", "ระยะสิ้นสุด", "ระยะรวม", "เปิดเมื่อ", "ปิดเมื่อ"]
+    def _txt(v):   # กัน Google Sheet ตัด 0 หน้าเบอร์ (0834... → 834...)
+        v = (str(v) if v is not None else "").strip()
+        return ("'" + v) if re.fullmatch(r"\d{6,}", v) else v
+
     rows = [[j.get("id"), "กำลังทำ" if j["status"] == "open" else "ปิดแล้ว",
-             j.get("customer"), j.get("jtype"), j.get("address"), j.get("phone"),
-             j.get("circuit"), j.get("start_len"), j.get("end_len"),
+             (j.get("customer") or "").strip() or "(ไม่มีชื่อ)",
+             j.get("jtype"), j.get("address") or "", _txt(j.get("phone")),
+             _txt(j.get("circuit")), j.get("start_len"), j.get("end_len"),
              j.get("total_len"), j.get("created_at"), j.get("closed_at")]
             for j in jobs]
     return _sheet_payload({"action": "sync", "sheet": "งาน", "head": head,
@@ -3872,6 +3920,10 @@ async def slash_photo(interaction: discord.Interaction, camera: app_commands.Cho
 @bot.event
 async def on_ready():
     global _last_channel_id
+    try:
+        await asyncio.to_thread(_jobs_fix_legacy)   # ล้างชื่อขยะในงานเก่า
+    except Exception:
+        pass
     try:
         await tree.sync()
         log.info("Slash commands synced")
