@@ -464,6 +464,7 @@ SYSTEM_PROMPT = """คุณคือ Jarvis AI ผู้ช่วยส่ว�
 - "camera"        : ถ่ายรูปจากมือถือส่งเข้าแชต — action_text "back" (หลัง) หรือ "front" (หน้า)
 - "map"           : Google Maps — action_text เช่น "นำทางไป<ชื่อลูกค้า>", "หา ปั๊ม ใกล้ฉัน", "แผนที่<สถานที่>"
 - "today"         : งานวันนี้ — ลิสต์งานที่มีเวลานัดวันนี้เรียงตามเวลา + ปุ่มเส้นทาง Maps (คำเช่น "งานวันนี้", "ตารางวันนี้")
+- "custmap"       : ลูกค้าทั้งสมุดบนแผนที่ A→B→C (คำเช่น "แผนที่ลูกค้า", "ลูกค้าบนแผนที่")
 - "sheet_push"    : ส่งข้อมูลเข้า Google Sheet — action_text "งาน" หรือ "ลูกค้า"
 - "daily_report"  : สรุปงานวันนี้/รายงานงาน — สรุปงานที่ปิดวันนี้ ระยะสายรวม และงานค้าง
 - "brightness"     : ปรับความสว่างจอ — action_text เช่น "สว่างสุด", "หรี่จอ", "50%"
@@ -571,6 +572,9 @@ def fallback_intent(text):
         return "net", text
     if "แบต" in t or "battery" in t:
         return "check_battery", ""
+    if any(k in t for k in ("แผนที่ลูกค้า", "ลูกค้าบนแผนที่",
+                            "ลูกค้าทั้งหมดบนแผนที่")) and len(t) < 50:
+        return "custmap", ""
     is_map = any(k in t for k in ("นำทาง", "เอาทาง", "แผนที่", "แมพ")) or \
         bool(re.search(r"ไป\s*\S+\s*ยังไง", t)) or \
         bool(re.search(r"ใกล้(ฉัน|เรา|ที่นี่)", t) and len(t) < 60)
@@ -1153,7 +1157,7 @@ UPDATE_URL = ("https://codeload.github.com/kaoltx-beep/ai-assistant-status/"
               "tar.gz/refs/heads/" + UPDATE_BRANCH)
 SELF_PATH = os.path.abspath(__file__)
 _UPDATE_MARKER = "jarvis-self-update"
-BOT_BUILD = "build 2026-09-29 09:20 (ตาทน 503)"
+BOT_BUILD = "build 2026-09-29 09:35 (ลูกค้าบนแผนที่)"
 
 
 def _fetch_latest_code():
@@ -1951,6 +1955,14 @@ class CustomerPanel(discord.ui.View):
             f"📇 **สมุดลูกค้า ({len(rows)})**\n```\n{body[:1800]}\n```",
             ephemeral=True)
 
+    @discord.ui.button(label="ลูกค้าบนแผนที่", emoji="🗺️",
+                       style=discord.ButtonStyle.success)
+    async def mapall(self, interaction: discord.Interaction,
+                     button: discord.ui.Button):
+        await interaction.response.defer(thinking=True)
+        txt = await asyncio.to_thread(customers_map_text)
+        await interaction.followup.send(txt, view=CustMapView())
+
 
 @tree.command(name="customers", description="📇 สมุดลูกค้าของคุณ (ปุ่มเพิ่ม/ค้นหา/ดู)")
 async def slash_customers(interaction: discord.Interaction):
@@ -1966,6 +1978,69 @@ HANDS["timer"] = hand_timer
 HANDS["calc"] = hand_calc
 HANDS["net"] = hand_net
 HANDS["contacts"] = hand_contacts
+
+
+# ============================================================
+# 🗺️ ลูกค้าบนแผนที่ — ปุ่มเดียว เห็นลูกค้าทั้งสมุดเป็นจุด A→B→C
+# ============================================================
+def customers_map_points(limit=9):
+    """ลูกค้าที่มีที่อยู่ (สูงสุด 9 จุด — Maps รับหลายจุดได้ประมาณนี้)"""
+    pts = []
+    rows = list(_cust_search("", 50))
+    rows.reverse()   # เรียงตามลำดับที่เพิ่มลูกค้า (เก่า→ใหม่) ให้ตรงเลข 1,2,3 ในสมุด
+    for _cid, name, _ph, addr, _nt in rows:
+        if addr:
+            pts.append((name or "ลูกค้า", addr))
+        if len(pts) >= limit:
+            break
+    return pts
+
+
+def customers_map_url():
+    pts = customers_map_points()
+    if not pts:
+        return None
+    if len(pts) == 1:
+        return ("https://www.google.com/maps/dir/?api=1&destination="
+                + _map_quote(pts[0][1]))
+    url = ("https://www.google.com/maps/dir/?api=1&travelmode=driving"
+           "&destination=" + _map_quote(pts[-1][1])
+           + "&waypoints=" + _map_quote("|".join(a for _n, a in pts[:-1])))
+    return url
+
+
+def customers_map_text():
+    pts = customers_map_points()
+    if not pts:
+        return ("🗺️ ยังไม่มีลูกค้าที่มีที่อยู่ในสมุดครับ — เพิ่มได้ที่ /customers "
+                "(➕ เพิ่มลูกค้า) หรือจับงานจากรูปแล้วกด 📇 บันทึกงาน+ลูกค้า")
+    lines = [f"🗺️ **ลูกค้าบนแผนที่ ({len(pts)} จุด เรียง A→B→C):**", ""]
+    for i, (name, addr) in enumerate(pts, 1):
+        pin = chr(ord("A") + i - 1) if i <= 8 else str(i)
+        lines.append(f"📍 **{pin}. {name}** — {addr[:70]}")
+    lines.append("")
+    lines.append("กดปุ่มด้านล่าง = Maps วางเส้นทางรอบทุกจุดให้เลยครับ 🚗")
+    return "\n".join(lines)
+
+
+HANDS["custmap"] = lambda t: customers_map_text()
+
+
+class CustMapView(discord.ui.View):
+    def __init__(self):
+        super().__init__()
+        url = customers_map_url()
+        if url:
+            self.add_item(discord.ui.Button(
+                label="เปิดแผนที่ลูกค้า (A→B→C)", emoji="🗺️", url=url))
+
+
+@tree.command(name="custmap",
+              description="🗺️ ลูกค้าทั้งสมุดบน Google Maps — เส้นทาง A→B→C")
+async def slash_custmap(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    txt = await asyncio.to_thread(customers_map_text)
+    await interaction.followup.send(txt, view=CustMapView())
 
 
 # ============================================================
@@ -3166,6 +3241,7 @@ async def slash_help(interaction: discord.Interaction):
         "• Google Sheet: /sheet เชื่อม + ส่งงาน/ลูกค้าเข้าชีต (เปิด auto ได้)\n"
         "• Google Maps: นำทางไป<ลูกค้า> • หา ปั๊ม ใกล้ฉัน • /map สถานที่\n"
         "• 📅 งานวันนี้: /today — เห็นงานเรียงตามเวลา + ปุ่มเส้นทาง A→B→C ทั้งวัน\n"
+        "• 🗺️ ลูกค้าบนแผนที่: /custmap หรือปุ่มใน /customers — พาไล่เยี่ยมทุกจุด A→B→C\n"
         "• 📸 จับงานจากรูป: แนบรูป Order Detail + พิมพ์ จับงาน — ถามยืนยันก่อนบันทึก\n\n"
         "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /apps /customers /job /note /report /auto /setkey /update /help",
         ephemeral=True)
