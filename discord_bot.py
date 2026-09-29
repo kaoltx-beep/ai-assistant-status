@@ -3245,15 +3245,42 @@ class JobImgConfirm(discord.ui.View):
         super().__init__(timeout=600)
         self.d = d
 
+    async def _save(self, interaction, also_customer):
+        jid = await asyncio.to_thread(_jobs_add, self.d)
+        if not also_customer:
+            await interaction.response.edit_message(
+                content=f"✅ บันทึกเป็นงาน **#{jid}** แล้วครับ! ดูทั้งหมดที่ /job "
+                        "— ถ้าเป็นงานวันนี้ก็จะขึ้นใน /today ด้วย",
+                view=None)
+            return
+        d = self.d
+        name = (d.get("customer") or "").strip()
+        if not name:
+            await interaction.response.edit_message(
+                content=f"✅ บันทึกเป็นงาน **#{jid}** แล้วครับ — แต่ไม่มีชื่อลูกค้า "
+                        "ในรูป เลยลงสมุดลูกค้าไม่ได้นะครับ",
+                view=None)
+            return
+        cid = await asyncio.to_thread(
+            _cust_add, name, (d.get("phone") or "").strip(),
+            (d.get("address") or "").strip(), "จากงาน #" + str(jid))
+        await interaction.response.edit_message(
+            content=f"✅ บันทึกเป็นงาน **#{jid}** + ลงสมุดลูกค้าแล้วครับ! "
+                    f"ต่อไปพิมพ์ **นำทางไป{name[:30]}** หรือ **โทร{d.get('phone') or '...'}** "
+                    "ก็ใช้ได้เลย",
+            view=None)
+
     @discord.ui.button(label="บันทึกเป็นงาน", emoji="✅",
                        style=discord.ButtonStyle.success)
     async def yes(self, interaction: discord.Interaction,
                   button: discord.ui.Button):
-        jid = await asyncio.to_thread(_jobs_add, self.d)
-        await interaction.response.edit_message(
-            content=f"✅ บันทึกเป็นงาน **#{jid}** แล้วครับ! ดูทั้งหมดที่ /job "
-                    "— ถ้าเป็นงานวันนี้ก็จะขึ้นใน /today ด้วย",
-            view=None)
+        await self._save(interaction, False)
+
+    @discord.ui.button(label="บันทึกงาน+ลูกค้า", emoji="📇",
+                       style=discord.ButtonStyle.primary)
+    async def both(self, interaction: discord.Interaction,
+                   button: discord.ui.Button):
+        await self._save(interaction, True)
 
     @discord.ui.button(label="ยกเลิก", emoji="❌",
                        style=discord.ButtonStyle.secondary)
