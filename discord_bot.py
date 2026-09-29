@@ -962,50 +962,67 @@ def _reply_text(resp):
 _gemini_model = None
 
 
-def gemini_vision_model():
-    """หาโมเดล Gemini ที่อ่านภาพได้จากรายชื่อจริงของ Google (ฟรี tier ใช้ได้)"""
-    global _gemini_model
-    if _gemini_model:
-        return _gemini_model
+def gemini_vision_models():
+    """รายชื่อโมเดล Gemini ที่อ่านภาพได้ เรียงจากน่าใช้สุดก่อน (หยิบจากรายการจริงของ Google)"""
     if not GEMINI_API_KEY:
-        return None
-    try:
-        from urllib.request import Request, urlopen
-        req = Request(
-            "https://generativelanguage.googleapis.com/v1beta/models?key="
-            + GEMINI_API_KEY)
-        data = json.loads(urlopen(req, timeout=20).read().decode())
-        names = []
+        return []
+    from urllib.request import Request, urlopen
+    req = Request(
+        "https://generativelanguage.googleapis.com/v1beta/models?key="
+        + GEMINI_API_KEY)
+    data = json.loads(urlopen(req, timeout=20).read().decode())
+    cands = []
+    for m in data.get("models", []):
+        name = (m.get("name") or "").replace("models/", "")
+        methods = m.get("supportedGenerationMethods") or []
+        low = name.lower()
+        if ("generateContent" not in methods or "gemini" not in low
+                or "flash" not in low):
+            continue
+        if any(k in low for k in ("embed", "tts", "image", "audio", "live",
+                                  "exp")):
+            continue
+        cands.append(name)
+
+    def rank(n):
+        low = n.lower()
+        latest = 1 if "latest" in low else 0
+        lite = 1 if "lite" in low else 0
+        nums = re.findall(r"(\d+)\.(\d+)", n)
+        ver = tuple(int(x) for x in nums[0]) if nums else (0, 0)
+        return (latest, ver, 1 - lite)
+
+    cands.sort(key=rank, reverse=True)
+    if not cands:   # ชื่อโมเดลเปลี่ยนไปทั้งตระกูล → เอา gemini ที่คุยได้ทุกตัว
         for m in data.get("models", []):
             name = (m.get("name") or "").replace("models/", "")
             methods = m.get("supportedGenerationMethods") or []
-            if ("generateContent" in methods and "flash" in name.lower()
-                    and not any(k in name for k in ("embed", "tts", "image-gen"))):
-                names.append(name)
-        names.sort(key=lambda n: ("flash" not in n, n))
-        if names:
-            globals()["_gemini_model"] = names[0]
-            log.info("ใช้ตา (Gemini): %s", names[0])
-            return names[0]
-    except Exception as e:
-        log.warning("หาโมเดล Gemini ไม่สำเร็จ: %s", e)
-    return None
+            low = name.lower()
+            if ("generateContent" in methods and "gemini" in low
+                    and not any(k in low for k in ("embed", "tts", "audio",
+                                                   "live"))):
+                cands.append(name)
+        cands.sort(reverse=True)
+    return cands
 
 
 def gemini_ocr(img_bytes, content_type="image/jpeg", question=None):
-    """อ่านรูปด้วย Gemini (ทางเลือก B เมื่อ Groq ไม่มีตาให้)"""
+    """อ่านรูปด้วย Gemini — ไล่ลองหลายโมเดล (404=โมเดลถูกปิด → ข้ามไปตัวถัดไป)"""
     if not GEMINI_API_KEY:
         raise RuntimeError(
             "ยังไม่มี GEMINI_API_KEY — ขอฟรีที่ aistudio.google.com/apikey "
             "แล้วพิมพ์ /setkey gemini <key>")
-    model = gemini_vision_model()
-    if not model:
-        raise RuntimeError("เชื่อมต่อ Gemini ไม่สำเร็จ (เช็ค key/เน็ต)")
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+    cands = gemini_vision_models()
+    if _gemini_model:   # ตัวที่เคยสำเร็จลองก่อนเสมอ
+        cands = [_gemini_model] + [c for c in cands if c != _gemini_model]
+    if not cands:
+        raise RuntimeError("เชื่อม Gemini ได้แต่ไม่เจอโมเดลอ่านภาพ (key นี้อาจไม่ได้เปิดสิทธิ์)")
     if not question:
         question = ("ถอดข้อความทั้งหมดในรูปนี้เป็นข้อความธรรมดา "
                     "รักษาโครงสร้างบรรทัดและป้ายกำกับเดิมทุกบรรทัด "
                     "อย่าเพิ่มคำอธิบายของคุณเอง")
-    from urllib.request import Request, urlopen
     b64 = _base64.b64encode(img_bytes).decode()
     body = json.dumps({
         "contents": [{"parts": [
@@ -1014,15 +1031,37 @@ def gemini_ocr(img_bytes, content_type="image/jpeg", question=None):
         ]}],
         "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048},
     }).encode()
-    url = ("https://generativelanguage.googleapis.com/v1beta/models/"
-           + model + ":generateContent?key=" + GEMINI_API_KEY)
-    resp = json.loads(urlopen(Request(
-        url, data=body, headers={"Content-Type": "application/json"},
-        method="POST"), timeout=90).read().decode())
-    parts = ((resp.get("candidates") or [{}])[0].get("content") or {}
-             ).get("parts") or []
-    text = "\n".join(p.get("text", "") for p in parts if isinstance(p, dict))
-    return clean_reply(text).strip() or None
+    tried = []
+    for model in cands[:5]:
+        url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+               + model + ":generateContent?key=" + GEMINI_API_KEY)
+        try:
+            resp = json.loads(urlopen(Request(
+                url, data=body, headers={"Content-Type": "application/json"},
+                method="POST"), timeout=90).read().decode())
+        except HTTPError as e:
+            if e.code in (400, 404):
+                tried.append(model + " HTTP" + str(e.code))
+                log.info("โมเดล %s ไม่ตอบ (%s) — ลองตัวถัดไป", model, e.code)
+                continue
+            if e.code == 429:
+                raise RuntimeError("Gemini คิวเต็มชั่วคราว (429) — รอ 1 นาทีแล้วส่งรูปใหม่")
+            if e.code in (401, 403):
+                raise RuntimeError("key Gemini ถูกปฏิเสธ (" + str(e.code)
+                                   + ") — เช็ค key หรือขอใหม่ที่ aistudio.google.com/apikey")
+            raise RuntimeError("Gemini HTTP " + str(e.code) + " (" + model + ")")
+        parts = ((resp.get("candidates") or [{}])[0].get("content") or {}
+                 ).get("parts") or []
+        text = "\n".join(p.get("text", "") for p in parts if isinstance(p, dict))
+        out = clean_reply(text).strip()
+        if out:
+            globals()["_gemini_model"] = model   # จำตัวที่ชนะไว้ใช้รอบหน้า
+            log.info("ตา Gemini ใช้โมเดล: %s", model)
+            return out
+    if tried:
+        raise RuntimeError("โมเดล Gemini ที่ลองไม่มีตัวตอบ ("
+                           + "; ".join(tried[:3]) + ") — รอสักครู่แล้วลองใหม่ครับ")
+    raise RuntimeError("Gemini ไม่ตอบข้อความกลับมาครับ")
 
 
 _DEFAULT_OCR_Q = ("ถอดข้อความทั้งหมดในรูปนี้เป็นข้อความธรรมดา "
