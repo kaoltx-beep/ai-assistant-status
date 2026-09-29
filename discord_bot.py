@@ -1279,7 +1279,7 @@ UPDATE_URL = ("https://codeload.github.com/kaoltx-beep/ai-assistant-status/"
               "tar.gz/refs/heads/" + UPDATE_BRANCH)
 SELF_PATH = os.path.abspath(__file__)
 _UPDATE_MARKER = "jarvis-self-update"
-BOT_BUILD = "build 2026-09-29 23:05 (แก้ปุ่มตั้งลิงก์ชีต)"
+BOT_BUILD = "build 2026-09-29 23:40 (ชื่องานชัด + ระยะทางจากคุณ)"
 
 
 def _fetch_latest_code():
@@ -1398,6 +1398,12 @@ def _parse_job_text(text):
             "start_len": None, "end_len": None, "total_len": None, "extra": {}}
     ex = data["extra"]
 
+    # 0) ล้าง markdown ที่ตาอ่านรูป (Gemini) ชอบแถมมา เช่น "#### ข้อมูลของ order", "**ชื่อ**"
+    #    ไม่งั้นหัวข้อพวกนี้จะหลุดไปเป็น "ชื่อลูกค้า" (เคยพังมาแล้ว)
+    text = re.sub(r"^[ \t]*#{1,6}[ \t]*", "", text or "", flags=re.M)
+    text = re.sub(r"\*\*|__|`", "", text)
+    text = re.sub(r"^[ \t]*[-•][ \t]+", "", text, flags=re.M)
+
     # 1) หัวแบบ "1. ชื่อ (09:00 - 12:00) — ประเภทงาน"
     m = re.search(r"^\s*\d+\.\s*(.+?)(?:\s*\(([^)]*)\))?\s*[—–-]+\s*(.+)$",
                   text, re.M)
@@ -1485,24 +1491,99 @@ def _parse_job_text(text):
     if ml:
         ex["LOID"] = ml.group(1)
 
-    # 10) ชื่อสำรอง: บรรทัดสั้น ๆ ที่เป็นภาษาไทย ไม่มีโครงสร้างอื่นปน
+    # 10) ชื่อสำรอง — ไล่จากแน่ใจมาก → น้อย
+    skip_re = (r"^(เลขที่|ลูกค้า|ที่อยู่|เบอร์โทร|ชื่อ|รายละเอียด|สถานะ|หมายเหตุ|หมายเลข|"
+               r"ข้อมูล|ประเภท|วันที่|วันเวลา|เวลา|พิกัด|แพ็กเกจ|แพคเกจ|บริการ|ความเร็ว|"
+               r"order|detail|device|status|router|olt|onu|customer|address|location|"
+               r"package|service|name|note|remark)")
+    coord_re = r"\s*\d{1,3}\.\d{3,}\s*,?\s*\d{1,3}\.\d{3,}\s*"
+
+    def _is_name_like(v):
+        v = (v or "").strip()
+        return (2 <= len(v) <= 80 and re.search(r"[ก-๙A-Za-z]", v)
+                and not re.fullmatch(coord_re, v)
+                and not re.search(r"\d{5,}", v)
+                and not re.match(skip_re, v, re.I))
+
+    # 10a) "ชื่อ: xxx" / "ลูกค้า: xxx" / "Customer: xxx" อยู่บรรทัดเดียวกัน
     if not data["customer"]:
-        skip_re = r"^(เลขที่|ลูกค้า|ที่อยู่|เบอร์โทร|ชื่อ|รายละเอียด|สถานะ|หมายเหตุ|หมายเลข|order|detail|device|status|router|olt|onu)"
+        mn = re.search(r"^[ \t]*(?:ชื่อ[^:\n]{0,14}|ลูกค้า|ผู้ใช้บริการ|customer(?:\s*name)?|name)"
+                       r"[ \t]*[:：][ \t]*(.+)$", text, re.M | re.I)
+        if mn and _is_name_like(mn.group(1)):
+            data["customer"] = mn.group(1).strip()[:80]
+
+    # 10b) มีคำนำหน้าชื่อ (คุณ/นาย/นาง/นางสาว/บริษัท/ร้าน ...) = ชื่อคนแน่ ๆ
+    if not data["customer"]:
+        mt = re.search(r"(?:^|[\s:：])((?:คุณ|นาย|นางสาว|นาง|น\.ส\.|ด\.ช\.|ด\.ญ\.|"
+                       r"บริษัท|บจก\.|หจก\.|ร้าน|Mr\.?|Mrs\.?|Ms\.?|K\.)\s*"
+                       r"[ก-๙A-Za-z][^\n:：,()]{1,60})", text)
+        if mt and _is_name_like(mt.group(1)):
+            data["customer"] = re.sub(r"\s+", " ", mt.group(1)).strip()[:80]
+
+    # 10c) บรรทัดสั้น ๆ ภาษาไทย ไม่มีโครงสร้างอื่นปน (ข้ามหัวข้อ/พิกัด/ค่าที่ใช้ไปแล้ว)
+    used = {str(v).strip() for v in (data["address"], data["phone"], data["jtype"],
+                                     data["circuit"]) if v}
+    used |= {str(v).strip() for v in ex.values() if v}
+    if not data["customer"]:
         for l in lines:
-            if (len(l) <= 60 and re.search(r"[ก-๙]", l) and ":" not in l
-                    and "," not in l and "/" not in l and not re.search(r"\d{5,}", l)
-                    and not re.match(skip_re, l.strip())):
-                data["customer"] = re.sub(r"^\d+\.\s*", "", l)[:80]
+            l2 = re.sub(r"^#+\s*", "", l).strip()
+            if l2 in used or re.match(r"^\d+\s*(ม\.|หมู่|ซ\.|ถ\.)", l2):
+                continue   # เป็นที่อยู่/ค่าอื่นที่เก็บไปแล้ว ไม่ใช่ชื่อ
+            if (len(l2) <= 60 and re.search(r"[ก-๙]", l2) and ":" not in l2
+                    and "," not in l2 and "/" not in l2 and not re.search(r"\d{5,}", l2)
+                    and not re.fullmatch(coord_re, l2)
+                    and not re.match(skip_re, l2, re.I)):
+                data["customer"] = re.sub(r"^\d+\.\s*", "", l2)[:80]
                 break
         if not data["customer"]:
             first = lines[0] if lines else ""
-            if (first and not re.match(skip_re, first.strip())
+            if (first and first.strip() not in used
+                    and not re.match(skip_re, first.strip(), re.I)
                     and not re.match(r"^\d{1,2}/\d{1,2}/\d{2,4}\b", first)
-                    and not re.fullmatch(
-                        r"\s*\d{1,3}\.\d{3,}\s*,?\s*\d{1,3}\.\d{3,}\s*",
-                        first)):
+                    and not re.fullmatch(coord_re, first)):
                 data["customer"] = re.sub(r"^\d+\.\s*", "", first)[:80]
     return data
+
+
+# ---------- 📍 ระยะทางจากตำแหน่งคุณ → งาน ----------
+def _job_latlon(j):
+    """พิกัดของงาน: extra['พิกัด'] → พิกัดที่ฝังในที่อยู่ → geocode ที่อยู่ (OSM ฟรี)"""
+    ex = j.get("extra") or {}
+    for cand in (str(ex.get("พิกัด") or ""), j.get("address") or ""):
+        m = re.search(r"(\d{1,3}\.\d{3,})\s*,?\s*(\d{1,3}\.\d{3,})", cand)
+        if m:
+            return float(m.group(1)), float(m.group(2))
+    addr = (j.get("address") or "").strip()
+    if len(addr) >= 8:
+        try:
+            c = _geo_coords(addr)
+            if c:
+                la, lo = c.split(",")
+                return float(la), float(lo)
+        except Exception:
+            pass
+    return None
+
+
+def _job_dist_km(j, origin=None):
+    """ระยะทางตรง (กม.) จากตำแหน่งมือถือ → งาน; หาไม่ได้คืน None"""
+    origin = origin or _current_latlon()
+    if not origin:
+        return None
+    ll = _job_latlon(j)
+    if not ll:
+        return None
+    try:
+        return _haversine_km(origin[0], origin[1], ll[0], ll[1])
+    except Exception:
+        return None
+
+
+def _job_dist_text(j, origin=None):
+    d = _job_dist_km(j, origin)
+    if d is None:
+        return ""
+    return f"📍 ห่างจากคุณ ~{d:.1f} กม. (เส้นตรง)"
 
 
 _JOB_COLS = ("id,customer,jtype,address,phone,circuit,start_len,end_len,"
@@ -1628,13 +1709,17 @@ class JobAddModal(discord.ui.Modal, title="🧰 เปิดงานใหม�
     circuit = discord.ui.TextInput(label="Circuit", required=False, max_length=80)
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         jid = _jobs_add({"customer": str(self.customer.value).strip(),
                          "jtype": str(self.jtype.value).strip(),
                          "address": str(self.address.value).strip(),
                          "phone": str(self.phone.value).strip(),
                          "circuit": str(self.circuit.value).strip()})
-        await interaction.response.send_message(
-            f"🧰 เปิดงาน #{jid} แล้วครับ\n```{_job_card(_jobs_get(jid))}```",
+        j = _jobs_get(jid)
+        dist = await asyncio.to_thread(_job_dist_text, j)
+        await interaction.followup.send(
+            f"🧰 เปิดงาน #{jid} **{j.get('customer') or ''}** แล้วครับ\n"
+            + (dist + "\n" if dist else "") + f"```{_job_card(j)}```",
             ephemeral=True)
 
 
@@ -1644,10 +1729,14 @@ class JobPasteModal(discord.ui.Modal, title="📥 วางข้อความ
                                 max_length=4000)
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         d = _parse_job_text(str(self.blob.value))
         jid = _jobs_add(d)
-        await interaction.response.send_message(
-            f"📥 เปิดงาน #{jid} จากข้อความที่วางแล้วครับ\n```{_job_card(_jobs_get(jid))}```",
+        j = _jobs_get(jid)
+        dist = await asyncio.to_thread(_job_dist_text, j)
+        await interaction.followup.send(
+            f"📥 เปิดงาน #{jid} **{j.get('customer') or ''}** จากข้อความที่วางแล้วครับ\n"
+            + (dist + "\n" if dist else "") + f"```{_job_card(j)}```",
             ephemeral=True)
 
 
@@ -2611,13 +2700,19 @@ def today_jobs_text():
     if not jobs:
         return ("📅 วันนี้ไม่มีงานที่ระบุเวลาครับ — สบาย ๆ\n"
                 "(เพิ่มงานที่ /job โดยวางข้อความงานที่มีเวลา เช่น 09:00-12:00 ก็จะโผล่ที่นี่)")
+    origin = _current_latlon()   # ถามตำแหน่งครั้งเดียว ใช้คำนวณทุกงาน
     lines = [f"📅 **งานวันนี้ ({now:%d/%m}) — {len(jobs)} งาน เรียงตามเวลา:**", ""]
     for i, j in enumerate(jobs, 1):
         st = _job_start_dt(j)
         mark = "✅" if st <= now else ("🔔" if (st - now).total_seconds() <= 3600 else "⏳")
-        lines.append(f"{mark} **{i}. {st:%H:%M}** #{j['id']} {(j['customer'] or '')[:40]}")
+        who = (j.get("customer") or "").strip() or (j.get("jtype") or "").strip() or "ไม่ระบุชื่อ"
+        km = _job_dist_km(j, origin) if origin else None
+        d = f"  📍 ~{km:.1f} กม." if km is not None else ""
+        lines.append(f"{mark} **{i}. {st:%H:%M}** #{j['id']} {who[:40]}{d}")
         if j.get("address"):
             lines.append(f"     🏠 {j['address'][:100]}")
+        elif j.get("phone"):
+            lines.append(f"     ☎ {j['phone']}")
     lines.append("")
     lines.append("🗺️ กดปุ่ม **เส้นทางวันนี้** ด้านล่าง = Maps จัดเส้นทาง A→B→C ให้ทั้งวันเลยครับ")
     return "\n".join(lines)
@@ -3828,6 +3923,9 @@ def _job_preview(j):
         lines.append("🗓️ เวลานัด: " + str(when))
     if ex.get("พิกัด"):
         lines.append("📍 พิกัด: " + str(ex["พิกัด"]))
+    dist = _job_dist_text(j)
+    if dist:
+        lines.append(dist)
     lines += ["", "บันทึกเข้าระบบงานเลยไหมครับ?"]
     return "\n".join(lines)
 
@@ -3839,10 +3937,14 @@ class JobImgConfirm(discord.ui.View):
 
     async def _save(self, interaction, also_customer):
         jid = await asyncio.to_thread(_jobs_add, self.d)
+        who = (self.d.get("customer") or "").strip()
+        head = f"✅ บันทึกเป็นงาน **#{jid} {who}** แล้วครับ!"
+        dist = await asyncio.to_thread(_job_dist_text, self.d)
+        if dist:
+            head += "\n" + dist
         if not also_customer:
             await interaction.response.edit_message(
-                content=f"✅ บันทึกเป็นงาน **#{jid}** แล้วครับ! ดูทั้งหมดที่ /job "
-                        "— ถ้าเป็นงานวันนี้ก็จะขึ้นใน /today ด้วย",
+                content=head + "\nดูทั้งหมดที่ /job — ถ้าเป็นงานวันนี้ก็จะขึ้นใน /today ด้วย",
                 view=None)
             return
         d = self.d
@@ -3857,7 +3959,7 @@ class JobImgConfirm(discord.ui.View):
             _cust_add, name, (d.get("phone") or "").strip(),
             (d.get("address") or "").strip(), "จากงาน #" + str(jid))
         await interaction.response.edit_message(
-            content=f"✅ บันทึกเป็นงาน **#{jid}** + ลงสมุดลูกค้าแล้วครับ! "
+            content=head + " (ลงสมุดลูกค้าด้วยแล้ว) "
                     f"ต่อไปพิมพ์ **นำทางไป{name[:30]}** หรือ **โทร{d.get('phone') or '...'}** "
                     "ก็ใช้ได้เลย",
             view=None)
