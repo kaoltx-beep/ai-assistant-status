@@ -461,6 +461,7 @@ SYSTEM_PROMPT = """คุณคือ Jarvis AI ผู้ช่วยส่ว�
 - "torch"         : เปิด/ปิดไฟฉาย — action_text "on" หรือ "off"
 - "camera"        : ถ่ายรูปจากมือถือส่งเข้าแชต — action_text "back" (หลัง) หรือ "front" (หน้า)
 - "map"           : Google Maps — action_text เช่น "นำทางไป<ชื่อลูกค้า>", "หา ปั๊ม ใกล้ฉัน", "แผนที่<สถานที่>"
+- "today"         : งานวันนี้ — ลิสต์งานที่มีเวลานัดวันนี้เรียงตามเวลา + ปุ่มเส้นทาง Maps (คำเช่น "งานวันนี้", "ตารางวันนี้")
 - "sheet_push"    : ส่งข้อมูลเข้า Google Sheet — action_text "งาน" หรือ "ลูกค้า"
 - "daily_report"  : สรุปงานวันนี้/รายงานงาน — สรุปงานที่ปิดวันนี้ ระยะสายรวม และงานค้าง
 - "brightness"     : ปรับความสว่างจอ — action_text เช่น "สว่างสุด", "หรี่จอ", "50%"
@@ -1238,9 +1239,12 @@ def _parse_job_text(text):
     # 3) ป้ายกำกับบรรทัดเดี่ยวแล้วค่าอยู่บรรทัดถัดไป (สไตล์ Order Detail)
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     label_map = {"ชื่อ-นามสกุล": "customer", "ชื่อนามสกุล": "customer",
-                 "ชื่อลูกค้า": "customer", "ชื่อ": "customer",
+                 "ชื่อลูกค้า": "customer", "ชื่อผู้ใช้": "customer",
+                 "ชื่อ": "customer", "ลูกค้า": "customer",
                  "ที่อยู่": "address", "ที่อยู่จัดส่ง": "address",
-                 "เบอร์โทร": "phone", "เบอร์โทรศัพท์": "phone", "phone": "phone"}
+                 "ที่อยู่ลูกค้า": "address", "ที่อยู่ใหม่": "address",
+                 "เบอร์โทร": "phone", "เบอร์โทรศัพท์": "phone",
+                 "เบอร์โทรติดต่อ": "phone", "phone": "phone", "tel": "phone"}
     for i, l in enumerate(lines):
         lab = l.replace(" ", "").lower()
         f = None
@@ -1270,7 +1274,7 @@ def _parse_job_text(text):
             data["jtype"] = mj.group(1).strip()[:80]
 
     # 7) ความเร็วเน็ต เช่น 300Mbps
-    ms = re.search(r"\b(\d{2,4})\s*[- ]?\s*Mbps\b", text, re.I)
+    ms = re.search(r"\b(\d{2,4})\s*[- ]?\s*M(?:bps|ps|b/s)\b", text, re.I)
     if ms:
         ex["ความเร็ว"] = ms.group(1) + "Mbps"
 
@@ -1290,9 +1294,11 @@ def _parse_job_text(text):
 
     # 10) ชื่อสำรอง: บรรทัดสั้น ๆ ที่เป็นภาษาไทย ไม่มีโครงสร้างอื่นปน
     if not data["customer"]:
+        skip_re = r"^(เลขที่|ลูกค้า|ที่อยู่|เบอร์โทร|ชื่อ|รายละเอียด|สถานะ|หมายเหตุ|หมายเลข|order|detail|device|status|router|olt|onu)"
         for l in lines:
             if (len(l) <= 60 and re.search(r"[ก-๙]", l) and ":" not in l
-                    and "," not in l and "/" not in l and not re.search(r"\d{5,}", l)):
+                    and "," not in l and "/" not in l and not re.search(r"\d{5,}", l)
+                    and not re.match(skip_re, l.strip())):
                 data["customer"] = re.sub(r"^\d+\.\s*", "", l)[:80]
                 break
         if not data["customer"]:
@@ -3096,7 +3102,9 @@ async def slash_help(interaction: discord.Interaction):
         "• สั่งกำกวมเมื่อไหร่ บอทจะโชว์ปุ่มให้กดเลือกทันที 🎛️\n"
         "• รูปงาน Timestamp: พิมพ์ รูปงาน / เพิ่มแอปอื่นเป็นปุ่มด้วย /addapp\n"
         "• Google Sheet: /sheet เชื่อม + ส่งงาน/ลูกค้าเข้าชีต (เปิด auto ได้)\n"
-        "• Google Maps: นำทางไป<ลูกค้า> • หา ปั๊ม ใกล้ฉัน • /map สถานที่\n\n"
+        "• Google Maps: นำทางไป<ลูกค้า> • หา ปั๊ม ใกล้ฉัน • /map สถานที่\n"
+        "• 📅 งานวันนี้: /today — เห็นงานเรียงตามเวลา + ปุ่มเส้นทาง A→B→C ทั้งวัน\n"
+        "• 📸 จับงานจากรูป: แนบรูป Order Detail + พิมพ์ จับงาน — ถามยืนยันก่อนบันทึก\n\n"
         "คำสั่งลัด: /ask /battery /weather /voice /torch /photo /apps /customers /job /note /report /auto /setkey /update /help",
         ephemeral=True)
 
