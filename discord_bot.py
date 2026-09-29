@@ -2698,25 +2698,69 @@ def hand_sheet(text=""):
 HANDS["sheet_push"] = hand_sheet
 
 
+def _sheet_set_link(u):
+    """ตั้งลิงก์ชีต (validate + บันทึก .env + อัปเดตตัวแปรรันไทม์) — คืน None=สำเร็จ"""
+    global SHEET_WEBHOOK_URL
+    u = (u or "").strip()
+    if not u.startswith("https://script.google"):
+        return ("❌ ลิงก์ต้องขึ้นต้น https://script.google.com/... (Web app URL "
+                "ที่ได้ตอนกด Deploy) — เช็คอีกครั้งครับ")
+    _env_upsert("SHEET_WEBHOOK_URL", u)
+    SHEET_WEBHOOK_URL = u
+    os.environ["SHEET_WEBHOOK_URL"] = u
+    return None
+
+
 class SheetURLModal(discord.ui.Modal, title="🔗 เชื่อม Google Sheet"):
     url = discord.ui.TextInput(
         label="Web app URL (ขึ้นต้น https://script.google.com/)",
         placeholder="วางลิงก์ที่ได้ตอน Deploy ใน Apps Script", max_length=300)
 
     async def on_submit(self, interaction: discord.Interaction):
-        global SHEET_WEBHOOK_URL
-        u = str(self.url.value).strip()
-        if not u.startswith("https://script.google"):
-            await interaction.response.send_message(
-                "❌ ลิงก์ต้องขึ้นต้น https://script.google.com/... (Web app URL "
-                "ที่ได้ตอนกด Deploy) — เช็คอีกครั้งครับ", ephemeral=True)
+        err = _sheet_set_link(str(self.url.value))
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
             return
-        _env_upsert("SHEET_WEBHOOK_URL", u)
-        SHEET_WEBHOOK_URL = u
-        os.environ["SHEET_WEBHOOK_URL"] = u
         await interaction.response.send_message(
             "🔗 เชื่อมชีตแล้วครับ! กด **🧪 ทดสอบ** ใน /sheet เพื่อยิงแถวทดสอบเข้าชีต "
             "(ถ้าทดสอบผ่าน = ระบบพร้อมใช้)", ephemeral=True)
+
+
+class SheetLinkConfirm(discord.ui.View):
+    """วางลิงก์ชีตในแชต → ถามยืนยัน 1 ปุ่ม → ตั้ง + ทดสอบเอง"""
+
+    def __init__(self, url):
+        super().__init__(timeout=180)
+        self.url = url
+
+    @discord.ui.button(label="ใช่ เชื่อมเลย", emoji="✅",
+                       style=discord.ButtonStyle.success)
+    async def yes(self, interaction: discord.Interaction,
+                  button: discord.ui.Button):
+        err = _sheet_set_link(self.url)
+        if err:
+            await interaction.response.edit_message(content=err, view=None)
+            return
+        await interaction.response.edit_message(
+            content="🔗 ตั้งลิงก์ชีตแล้ว! กำลังยิงแถวทดสอบเข้าชีต... 🧪", view=None)
+        try:
+            r = await asyncio.to_thread(_sheet_payload, {"action": "ping"})
+            msg = ("🧪 ทดสอบสำเร็จ! เปิดชีตดูจะมีแท็บ **log** และแถว ping โผล่มาครับ ✅"
+                   if r.get("ok") else f"❌ ชีตตอบว่าพัง: {r.get('msg', '')[:120]}")
+        except Exception as e:
+            msg = f"❌ {str(e)[:140]}"
+        try:
+            await interaction.followup.send(msg)
+        except Exception:
+            pass
+
+    @discord.ui.button(label="ไม่ใช่", emoji="❌",
+                       style=discord.ButtonStyle.secondary)
+    async def no(self, interaction: discord.Interaction,
+                 button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="ไม่ตั้งครับ — ถ้าจะเชื่อมทีหลัง พิมพ์ /sheet แล้วกด 🔗 ตั้งลิงก์",
+            view=None)
 
 
 class _SyncBtn(discord.ui.Button):
@@ -3121,6 +3165,14 @@ async def on_message(message: discord.Message):
 
     _last_channel_id = message.channel.id
     text = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
+
+    # 🔗 วางลิงก์ Google Sheet ในแชต = ถามยืนยันตั้งลิงก์ (1 ปุ่มจบ)
+    m_sheet = re.search(r"https://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec", text)
+    if m_sheet:
+        await message.channel.send(
+            "🔗 เจอลิงก์ Google Sheet — **เชื่อมกับ Jarvis เลยไหมครับ?** "
+            "กดปุ่มเดียวจบ", view=SheetLinkConfirm(m_sheet.group(0)))
+        return
 
     # 👀 เก็บรูปที่แนบมาด้วย (สูงสุด 2 รูป)
     images = []
