@@ -52,6 +52,17 @@ DISCORD_BOT_TOKEN = _get("DISCORD_BOT_TOKEN")
 GROQ_API_KEY = _get("GROQ_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()  # ตาทางเลือก B (ไม่มีก็ได้)
 SHEET_WEBHOOK_URL = os.environ.get("SHEET_WEBHOOK_URL", "").strip()  # Google Sheet (ไม่มีก็ได้)
+if not SHEET_WEBHOOK_URL:
+    try:   # โหลดจาก .env ข้างสคริปต์กันพลาด (load_dotenv พึ่ง cwd)
+        _ep = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        with open(_ep, encoding="utf-8") as _f:
+            for _l in _f:
+                if _l.strip().startswith("SHEET_WEBHOOK_URL="):
+                    SHEET_WEBHOOK_URL = _l.split("=", 1)[1].strip().strip('"').strip("'")
+                    os.environ["SHEET_WEBHOOK_URL"] = SHEET_WEBHOOK_URL
+                    break
+    except Exception:
+        pass
 GROQ_MODEL = _get("GROQ_MODEL")  # ไม่ต้องตั้ง — บอทเลือกโมเดลที่ยังมีชีวิตให้เอง
 MAX_TURNS = 5
 
