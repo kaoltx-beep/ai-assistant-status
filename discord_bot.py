@@ -1268,7 +1268,7 @@ UPDATE_URL = ("https://codeload.github.com/kaoltx-beep/ai-assistant-status/"
               "tar.gz/refs/heads/" + UPDATE_BRANCH)
 SELF_PATH = os.path.abspath(__file__)
 _UPDATE_MARKER = "jarvis-self-update"
-BOT_BUILD = "build 2026-09-29 20:40 (คุมเครื่อง+สต็อก)"
+BOT_BUILD = "build 2026-09-29 21:05 (แก้ชีต redirect)"
 
 
 def _fetch_latest_code():
@@ -3191,30 +3191,51 @@ def _env_upsert(key, value):
 
 
 def _sheet_payload(payload):
-    """ยิง payload ไปที่ Apps Script — POST ก่อน ถ้าพังสลับ GET (ทน redirect ทุกแบบ)"""
+    """ยิง payload ไปที่ Apps Script — POST ก่อน; ถ้า Google redirect กลืน
+    payload (สคริปต์ตอบว่า 'ไม่ระบุแอคชั่น') จะสลับไป GET ?payload= ทันที"""
     url = SHEET_WEBHOOK_URL
     if not url:
         raise RuntimeError("ยังไม่ได้ตั้งลิงก์ชีต")
-    raw = None
-    try:
+
+    def _post():
         req = _SReq(url, data=json.dumps(payload).encode(),
                     headers={"Content-Type": "application/json"}, method="POST")
-        raw = _Surlopen(req, timeout=60).read().decode()
-    except Exception as e1:
+        return _Surlopen(req, timeout=60).read().decode()
+
+    def _get():
+        gurl = url + ("&" if "?" in url else "?") + "payload=" + _Squote(
+            json.dumps(payload))
+        return _Surlopen(gurl, timeout=60).read().decode()
+
+    def _parse(raw):
         try:
-            gurl = url + ("&" if "?" in url else "?") + "payload=" + _Squote(
-                json.dumps(payload))
-            raw = _Surlopen(gurl, timeout=60).read().decode()
-        except Exception as e2:
-            raise RuntimeError(
-                f"เชื่อมชีตไม่ได้ (POST: {str(e1)[:45]} / GET: {str(e2)[:45]})") from e2
+            out = json.loads(raw)
+            return out if isinstance(out, dict) else {"ok": False,
+                                                      "msg": str(raw)[:100]}
+        except Exception:
+            return {"ok": False, "msg": str(raw)[:100]}
+
+    class _RedirectEaten(Exception):
+        pass
+
+    e1 = ""
     try:
-        out = json.loads(raw)
-        if not isinstance(out, dict):
-            raise ValueError
-        return out
-    except Exception:
-        return {"ok": False, "msg": str(raw)[:100]}
+        out = _parse(_post())
+        if out.get("ok"):
+            return out
+        if "แอคชั่น" in str(out.get("msg", "")):
+            raise _RedirectEaten()   # redirect กลืน payload → ลอง GET ต่อ
+        return out   # ชีตตอบจริง ๆ ว่าพัง (เช่น ชีตหาไม่เจอ) — ส่งตรง ๆ
+    except _RedirectEaten:
+        pass
+    except Exception as ex:
+        e1 = str(ex)
+    try:
+        return _parse(_get())
+    except Exception as e2:
+        raise RuntimeError(
+            f"เชื่อมชีตไม่ได้ (POST: {e1[:45] or 'ok:false'} / "
+            f"GET: {str(e2)[:45]})") from e2
 
 
 def sheet_append_job(j):
