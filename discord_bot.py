@@ -1037,21 +1037,40 @@ def gemini_ocr(img_bytes, content_type="image/jpeg", question=None):
     for model in cands[:5]:
         url = ("https://generativelanguage.googleapis.com/v1beta/models/"
                + model + ":generateContent?key=" + GEMINI_API_KEY)
-        try:
-            resp = json.loads(urlopen(Request(
-                url, data=body, headers={"Content-Type": "application/json"},
-                method="POST"), timeout=90).read().decode())
-        except HTTPError as e:
-            if e.code in (400, 404):
+        resp = None
+        for attempt in (1, 2):   # 5xx = เซิร์ฟเวอร์ติดขัด → หายใจ 3 วิลองซ้ำ แล้วค่อยข้าม
+            try:
+                resp = json.loads(urlopen(Request(
+                    url, data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST"), timeout=90).read().decode())
+                break
+            except HTTPError as e:
+                if e.code in (400, 404):
+                    tried.append(model + " HTTP" + str(e.code))
+                    log.info("โมเดล %s ไม่มีให้ใช้ (%s) — ลองตัวถัดไป",
+                             model, e.code)
+                    break
+                if e.code in (500, 502, 503, 504) and attempt == 1:
+                    log.info("โมเดล %s ติดขัด (%s) — ลองซ้ำใน 3 วิ",
+                             model, e.code)
+                    time.sleep(3)
+                    continue
+                if e.code == 429:
+                    raise RuntimeError(
+                        "Gemini คิวเต็มชั่วคราว (429) — รอ 1 นาทีแล้วส่งรูปใหม่")
+                if e.code in (401, 403):
+                    raise RuntimeError(
+                        "key Gemini ถูกปฏิเสธ (" + str(e.code)
+                        + ") — เช็ค key หรือขอใหม่ที่ aistudio.google.com/apikey")
                 tried.append(model + " HTTP" + str(e.code))
-                log.info("โมเดล %s ไม่ตอบ (%s) — ลองตัวถัดไป", model, e.code)
-                continue
-            if e.code == 429:
-                raise RuntimeError("Gemini คิวเต็มชั่วคราว (429) — รอ 1 นาทีแล้วส่งรูปใหม่")
-            if e.code in (401, 403):
-                raise RuntimeError("key Gemini ถูกปฏิเสธ (" + str(e.code)
-                                   + ") — เช็ค key หรือขอใหม่ที่ aistudio.google.com/apikey")
-            raise RuntimeError("Gemini HTTP " + str(e.code) + " (" + model + ")")
+                break
+            except Exception as e:
+                tried.append(model + " เน็ต/หมดเวลา")
+                log.info("โมเดล %s เชื่อมไม่ได้: %s", model, str(e)[:60])
+                break
+        if resp is None:
+            continue
         parts = ((resp.get("candidates") or [{}])[0].get("content") or {}
                  ).get("parts") or []
         text = "\n".join(p.get("text", "") for p in parts if isinstance(p, dict))
@@ -1061,8 +1080,9 @@ def gemini_ocr(img_bytes, content_type="image/jpeg", question=None):
             log.info("ตา Gemini ใช้โมเดล: %s", model)
             return out
     if tried:
-        raise RuntimeError("โมเดล Gemini ที่ลองไม่มีตัวตอบ ("
-                           + "; ".join(tried[:3]) + ") — รอสักครู่แล้วลองใหม่ครับ")
+        raise RuntimeError("ตอนนี้เซิร์ฟเวอร์ Gemini ติดขัด/ไม่ตอบ ("
+                           + "; ".join(tried[:3])
+                           + ") — รอ 1-2 นาทีแล้วส่งรูปใหม่อีกครั้งครับ ข้อมูลไม่หาย")
     raise RuntimeError("Gemini ไม่ตอบข้อความกลับมาครับ")
 
 
@@ -1133,7 +1153,7 @@ UPDATE_URL = ("https://codeload.github.com/kaoltx-beep/ai-assistant-status/"
               "tar.gz/refs/heads/" + UPDATE_BRANCH)
 SELF_PATH = os.path.abspath(__file__)
 _UPDATE_MARKER = "jarvis-self-update"
-BOT_BUILD = "build 2026-09-29 09:10 (บันทึกงาน+ลูกค้า)"
+BOT_BUILD = "build 2026-09-29 09:20 (ตาทน 503)"
 
 
 def _fetch_latest_code():
