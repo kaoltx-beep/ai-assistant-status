@@ -1279,7 +1279,7 @@ UPDATE_URL = ("https://codeload.github.com/kaoltx-beep/ai-assistant-status/"
               "tar.gz/refs/heads/" + UPDATE_BRANCH)
 SELF_PATH = os.path.abspath(__file__)
 _UPDATE_MARKER = "jarvis-self-update"
-BOT_BUILD = "build 2026-09-30 01:35 (+JobsByDateView GPS ระยะทาง + fix self-update)"
+BOT_BUILD = "build 2026-09-30 (+JobsByDateView: ปุ่มใช้งานได้ + defer interaction)"
 
 
 def _fetch_latest_code():
@@ -1950,7 +1950,7 @@ def _jobs_by_date(date_str, status=None, limit=200):
     return rows
 
 
-def _job_list_line(j, dist_text=""):
+def _job_list_line(j, dist_text=None):
     """สร้างบรรทัดสรุป 1 งาน สำหรับแสดงในตาราง"""
     status_icon = {"open": "🟡", "closed": "✅", "cancelled": "🔴"}.get(j["status"], "⚪")
     ex = j.get("extra") or {}
@@ -1961,7 +1961,8 @@ def _job_list_line(j, dist_text=""):
         time_str = f" ⏰{ex['วันเวลา']}"
     jtype = (j.get("jtype") or "")[:22]
     name = (j.get("customer") or "(ไม่มีชื่อ)").replace("\n", " ")[:24]
-    dist = dist_text or _job_dist_text(j) or "📍 - กม."
+    dist = dist_text if dist_text is not None else _job_dist_text(j)
+    dist = dist or "📍 - กม."
     return f"`#{j['id']:>3}` {status_icon} {name:<24} {dist:<16} {time_str} {jtype}"
 
 
@@ -1971,50 +1972,43 @@ class JobsByDateView(discord.ui.View):
         self.date_str = date_str or _dt.now().strftime("%Y-%m-%d")
         self.page = page
         self.per_page = per_page
-        self._build_buttons()
+        self._update_page_buttons()
 
-    def _build_buttons(self):
-        self.clear_items()
-        # Row 0: Date display + Prev/Next day + Refresh GPS
-        self.add_item(discord.ui.Button(
-            label=f"📅 {self.date_str}", style=discord.ButtonStyle.secondary,
-            custom_id="pick_date", row=0, disabled=True))
-        self.add_item(discord.ui.Button(
-            label="◀ วันก่อน", style=discord.ButtonStyle.primary,
-            custom_id="prev_day", row=0))
-        self.add_item(discord.ui.Button(
-            label="🔄 GPS", style=discord.ButtonStyle.success,
-            custom_id="refresh_gps", row=0))
-        self.add_item(discord.ui.Button(
-            label="วันถัดไป ▶", style=discord.ButtonStyle.primary,
-            custom_id="next_day", row=0))
-        # Row 1: Page navigation
-        self.add_item(discord.ui.Button(
-            label="◀ หน้าก่อน", style=discord.ButtonStyle.secondary,
-            custom_id="prev_page", row=1, disabled=self.page == 0))
-        self.add_item(discord.ui.Button(
-            label="หน้าถัดไป ▶", style=discord.ButtonStyle.secondary,
-            custom_id="next_page", row=1))
+    def _update_page_buttons(self, total_pages=None):
+        for item in self.children:
+            if item.custom_id == "prev_page":
+                item.disabled = self.page <= 0
+            elif item.custom_id == "next_page":
+                item.disabled = (total_pages is None or self.page >= total_pages - 1)
+
+    async def _edit_rendered_message(self, interaction, content):
+        if interaction.response.is_done():
+            await interaction.edit_original_response(content=content, view=self)
+        else:
+            await interaction.response.edit_message(content=content, view=self)
 
     async def _render(self, interaction):
-        jobs = _jobs_by_date(self.date_str)
+        jobs = await asyncio.to_thread(_jobs_by_date, self.date_str)
+        total_pages = max(1, (len(jobs) + self.per_page - 1) // self.per_page)
+        self.page = min(max(self.page, 0), total_pages - 1)
+
         if not jobs:
-            content = f"📭 ไม่มีงานในวันที่ {self.date_str}"
-            self._build_buttons()
-            if interaction.response.is_done():
-                await interaction.edit_original_response(content=content, view=self)
-            else:
-                await interaction.response.edit_message(content=content, view=self)
+            self._update_page_buttons(total_pages=0)
+            await self._edit_rendered_message(
+                interaction, f"📭 ไม่มีงานในวันที่ {self.date_str}")
             return
 
-        # คำนวณระยะทางทั้งหมดใน background thread
-        loop = asyncio.get_event_loop()
+        # อ่าน GPS เพียงครั้งเดียวต่อการแสดงผล ไม่เรียก termux-location ซ้ำทุกงาน
+        origin = await asyncio.to_thread(_current_latlon)
         lines = []
-        for j in jobs[self.page * self.per_page : (self.page + 1) * self.per_page]:
-            dist = await loop.run_in_executor(None, _job_dist_text, j)
-            lines.append(_job_list_line(j, dist))
+        start = self.page * self.per_page
+        page_jobs = jobs[start : start + self.per_page]
+        for job in page_jobs:
+            dist = ""
+            if origin:
+                dist = await asyncio.to_thread(_job_dist_text, job, origin)
+            lines.append(_job_list_line(job, dist))
 
-        total_pages = max(1, (len(jobs) + self.per_page - 1) // self.per_page)
         header = (
             f"📅 **งานวันที่ {self.date_str}** ({len(jobs)} งาน) — "
             f"หน้า {self.page + 1}/{total_pages}\n"
@@ -2024,56 +2018,49 @@ class JobsByDateView(discord.ui.View):
             f"{chr(10).join(lines)}\n"
             f"```"
         )
-        self._build_buttons()
-        # Update page button states
-        for item in self.children:
-            if item.custom_id == "prev_page":
-                item.disabled = (self.page == 0)
-            elif item.custom_id == "next_page":
-                item.disabled = (self.page >= total_pages - 1)
+        self._update_page_buttons(total_pages=total_pages)
+        await self._edit_rendered_message(interaction, header)
 
-        if interaction.response.is_done():
-            await interaction.edit_original_response(content=header, view=self)
-        else:
-            await interaction.response.edit_message(content=header, view=self)
-
-    @discord.ui.button(custom_id="prev_day")
+    @discord.ui.button(label="◀ วันก่อน", style=discord.ButtonStyle.primary,
+                       custom_id="prev_day", row=0)
     async def prev_day_btn(self, interaction, button):
-        try:
-            from datetime import timedelta
-            d = _dt.strptime(self.date_str, "%Y-%m-%d") - timedelta(days=1)
-            self.date_str = d.strftime("%Y-%m-%d")
-            self.page = 0
-            await self._render(interaction)
-        except Exception:
-            await interaction.response.send_message("❌ รูปแบบวันที่ผิด", ephemeral=True)
-
-    @discord.ui.button(custom_id="next_day")
-    async def next_day_btn(self, interaction, button):
-        try:
-            from datetime import timedelta
-            d = _dt.strptime(self.date_str, "%Y-%m-%d") + timedelta(days=1)
-            self.date_str = d.strftime("%Y-%m-%d")
-            self.page = 0
-            await self._render(interaction)
-        except Exception:
-            await interaction.response.send_message("❌ รูปแบบวันที่ผิด", ephemeral=True)
-
-    @discord.ui.button(custom_id="refresh_gps")
-    async def refresh_gps_btn(self, interaction, button):
-        # บังคับ refresh โดย re-render (จะเรียก _job_dist_text ใหม่ทั้งหมด)
+        await interaction.response.defer()
+        from datetime import timedelta
+        d = _dt.strptime(self.date_str, "%Y-%m-%d") - timedelta(days=1)
+        self.date_str = d.strftime("%Y-%m-%d")
+        self.page = 0
         await self._render(interaction)
 
-    @discord.ui.button(custom_id="prev_page")
+    @discord.ui.button(label="🔄 GPS", style=discord.ButtonStyle.success,
+                       custom_id="refresh_gps", row=0)
+    async def refresh_gps_btn(self, interaction, button):
+        await interaction.response.defer()
+        # Re-render retrieves GPS once and recalculates the visible page.
+        await self._render(interaction)
+
+    @discord.ui.button(label="วันถัดไป ▶", style=discord.ButtonStyle.primary,
+                       custom_id="next_day", row=0)
+    async def next_day_btn(self, interaction, button):
+        await interaction.response.defer()
+        from datetime import timedelta
+        d = _dt.strptime(self.date_str, "%Y-%m-%d") + timedelta(days=1)
+        self.date_str = d.strftime("%Y-%m-%d")
+        self.page = 0
+        await self._render(interaction)
+
+    @discord.ui.button(label="◀ หน้าก่อน", style=discord.ButtonStyle.secondary,
+                       custom_id="prev_page", row=1)
     async def prev_page_btn(self, interaction, button):
+        await interaction.response.defer()
         self.page -= 1
         await self._render(interaction)
 
-    @discord.ui.button(custom_id="next_page")
+    @discord.ui.button(label="หน้าถัดไป ▶", style=discord.ButtonStyle.secondary,
+                       custom_id="next_page", row=1)
     async def next_page_btn(self, interaction, button):
+        await interaction.response.defer()
         self.page += 1
         await self._render(interaction)
-
 
 # ============================================================
 # 🔑 /setkey — ใส่ API key เพิ่มจาก Discord (ไม่ต้องแตะ Termux)
