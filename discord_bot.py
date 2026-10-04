@@ -1672,7 +1672,7 @@ def _jobs_all(limit=500):
     return rows
 
 
-def _jobs_open(limit=25):
+def _jobs_open(limit=1000):
     cur = _jobs_conn().execute(
         f"SELECT {_JOB_COLS} FROM jobs WHERE status='open' ORDER BY id DESC LIMIT ?",
         (limit,))
@@ -1913,15 +1913,12 @@ class JobPanel(discord.ui.View):
     @discord.ui.button(label="ดูงานทั้งหมด", emoji="📋",
                        style=discord.ButtonStyle.secondary, row=1)
     async def viewall(self, interaction: discord.Interaction, button: discord.ui.Button):
-        jobs = _jobs_open()
+        jobs = _jobs_open(1000)
         if not jobs:
-            await interaction.response.send_message(
-                "📋 ยังไม่มีงานเปิดอยู่ครับ", ephemeral=True)
+            await interaction.response.send_message("📋 ยังไม่มีงานเปิดอยู่ครับ", ephemeral=True)
             return
-        body = "\n\n".join(_job_card(j) for j in jobs)
-        await interaction.response.send_message(
-            f"📋 **งานที่กำลังทำ ({len(jobs)})**\n```\n{body[:1800]}\n```",
-            ephemeral=True)
+        view = JobsOpenView(jobs=jobs)
+        await view._render(interaction)
 
     # ===== 🆕 ใหม่: งานตามวัน + ระยะทางจาก GPS =====
     @discord.ui.button(label="งานวันนี้ + ระยะทาง", emoji="📍",
@@ -1930,6 +1927,72 @@ class JobPanel(discord.ui.View):
         view = JobsByDateView()
         await view._render(interaction)
 
+
+# ============================================================
+# 🆕 View: แสดงงานเปิดทั้งหมด + Pagination
+# ============================================================
+class JobsOpenView(discord.ui.View):
+    def __init__(self, jobs=None, page=0, per_page=10):
+        super().__init__(timeout=600)
+        self.jobs = list(jobs if jobs is not None else _jobs_open(1000))
+        self.page = max(0, page)
+        self.per_page = per_page
+        self._build_buttons()
+
+    def _build_buttons(self):
+        self.clear_items()
+        total_pages = max(1, (len(self.jobs) + self.per_page - 1) // self.per_page)
+        prev = discord.ui.Button(label="◀ ก่อนหน้า", style=discord.ButtonStyle.secondary,
+                                 row=0, disabled=self.page <= 0)
+        prev.callback = self._prev
+        self.add_item(prev)
+        info = discord.ui.Button(label=f"หน้า {self.page + 1}/{total_pages}",
+                                 style=discord.ButtonStyle.secondary, row=0, disabled=True)
+        self.add_item(info)
+        nxt = discord.ui.Button(label="ถัดไป ▶", style=discord.ButtonStyle.secondary,
+                                row=0, disabled=self.page >= total_pages - 1)
+        nxt.callback = self._next
+        self.add_item(nxt)
+        ref = discord.ui.Button(label="🔄 รีเฟรช", style=discord.ButtonStyle.success, row=0)
+        ref.callback = self._refresh
+        self.add_item(ref)
+
+    async def _prev(self, interaction):
+        self.page = max(0, self.page - 1)
+        await self._render(interaction)
+
+    async def _next(self, interaction):
+        total_pages = max(1, (len(self.jobs) + self.per_page - 1) // self.per_page)
+        self.page = min(total_pages - 1, self.page + 1)
+        await self._render(interaction)
+
+    async def _refresh(self, interaction):
+        await self._render(interaction)
+
+    async def _render(self, interaction):
+        self.jobs = _jobs_open(1000)
+        total_pages = max(1, (len(self.jobs) + self.per_page - 1) // self.per_page)
+        self.page = min(self.page, total_pages - 1)
+        start = self.page * self.per_page
+        rows = self.jobs[start:start + self.per_page]
+        lines = []
+        for j in rows:
+            icon = {"open": "🟡", "closed": "✅", "cancelled": "🔴"}.get(j.get("status"), "⚪")
+            name = (j.get("customer") or "(ไม่มีชื่อ)").replace("\n", " ")[:50]
+            typ = (j.get("jtype") or "").replace("\n", " ")[:30]
+            line = f"{icon} #{j['id']} {name}"
+            if typ:
+                line += f" • {typ}"
+            lines.append(line)
+        body = "\n".join(lines) if lines else "ยังไม่มีงานเปิดอยู่ครับ"
+        content = (f"📋 งานที่กำลังทำทั้งหมด {len(self.jobs)} งาน\n"
+                   f"หน้า {self.page + 1}/{total_pages} • แสดงงาน {start + 1}-{start + len(rows)}\n"
+                   f"{body}")
+        self._build_buttons()
+        if interaction.response.is_done():
+            await interaction.edit_original_response(content=content, view=self)
+        else:
+            await interaction.response.send_message(content=content, view=self, ephemeral=True)
 
 # ============================================================
 # 🆕 View: แสดงงานตามวันที่ พร้อมระยะทาง GPS + Pagination
@@ -4001,6 +4064,24 @@ async def slash_job(interaction: discord.Interaction):
     await interaction.response.send_message(f"🧰 **ระบบงาน** — {desc}",
                                             view=JobPanel(), ephemeral=True)
 
+
+@tree.command(name="addjob", description="➕ เพิ่มงานใหม่อย่างรวดเร็ว")
+@app_commands.describe(customer="ชื่อลูกค้า", address="ที่อยู่", phone="เบอร์โทร",
+                         jtype="ประเภทงาน", circuit="Circuit")
+async def slash_addjob(interaction: discord.Interaction, customer: str, address: str = "",
+                       phone: str = "", jtype: str = "", circuit: str = ""):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    d = {"customer": customer.strip()[:80], "jtype": jtype.strip()[:80],
+         "address": address.strip()[:300], "phone": phone.strip()[:30],
+         "circuit": circuit.strip()[:80]}
+    if not d["customer"]:
+        await interaction.followup.send("❌ ต้องใส่ชื่อลูกค้าครับ", ephemeral=True)
+        return
+    jid = await asyncio.to_thread(_jobs_add, d)
+    j = await asyncio.to_thread(_jobs_get, jid)
+    await interaction.followup.send(
+        f"✅ เพิ่มงาน #{jid} {j.get('customer') or ''} แล้ว - {_job_card(j)}",
+        ephemeral=True)
 
 @tree.command(name="help", description="📖 ดูความสามารถทั้งหมดของ Jarvis")
 async def slash_help(interaction: discord.Interaction):
