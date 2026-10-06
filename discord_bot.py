@@ -64,6 +64,10 @@ if not SHEET_WEBHOOK_URL:
     except Exception:
         pass
 GROQ_MODEL = _get("GROQ_MODEL")  # ไม่ต้องตั้ง — บอทเลือกโมเดลที่ยังมีชีวิตให้เอง
+# ช่องทางเดิมของ MacroDroid/Hermes สำหรับสั่งแตะจอ — ถ้ามี URL อยู่แล้วใช้ต่อได้เลย
+MACRODROID_TAP_WEBHOOK_URL = (os.environ.get("MACRODROID_TAP_WEBHOOK_URL", "").strip()
+                              or os.environ.get("HERMES_TAP_WEBHOOK_URL", "").strip()
+                              or os.environ.get("MACRODROID_WEBHOOK_URL", "").strip())
 MAX_TURNS = 5
 
 if not DISCORD_BOT_TOKEN or "here" in str(DISCORD_BOT_TOKEN):
@@ -583,6 +587,7 @@ SYSTEM_PROMPT = """คุณคือ Jarvis AI ผู้ช่วยส่ว�
 - "net"            : เช็คสถานะอินเทอร์เน็ต/wifi ของเครื่อง
 - "contacts"       : หาเบอร์จากสมุดโทรศัพท์ในเครื่องจริง — action_text "หาเบอร์ <ชื่อ>"
 - "applist"        : ขอดูรายชื่อแอปที่ติดตั้งในเครื่อง
+- "tap"            : แตะหน้าจอมือถือที่พิกัด — action_text รูปแบบ "แตะ X Y" (ใช้เมื่อรู้พิกัดแน่นอน)
 - "open_app"       : เปิดแอปบนมือถือ — รู้จัก "รูปงาน"/"timestamp" (แอป Timestamp Camera ถ่ายรูปประทับเวลา) ด้วย — action_text เป็นชื่อแอป เช่น "youtube", "facebook", "line", "tiktok", "instagram", "shopee", "gmail", "maps" (ถ้าขอเปิดแอปธนาคาร ปฏิเสธสุภาพ ๆ เพื่อความปลอดภัย)
 - "location"      : ถามว่าฉันอยู่ที่ไหน/ตำแหน่งปัจจุบัน/พิกัด
 
@@ -709,6 +714,9 @@ def fallback_intent(text):
         return "sheet_push", text
     if any(k in t for k in ("รูปงาน", "timestamp", "ไทม์สแตมป์", "ไทม์แสตมป์")):
         return "open_app", text
+    m_tap = re.search(r"(?:แตะ|กด|tap)\\s*[:(]?\\s*(\\d{1,4})\\s*[,xX\\s]\\s*(\\d{1,4})", t)
+    if m_tap and len(t) < 80:
+        return "tap", text
     if any(k in t for k in ("รายชื่อแอป", "แอปในเครื่อง", "แอปที่ติดตั้ง")):
         return "applist", ""
     if ("เปิด" in t or "เข้า" in t) and find_app(t):
@@ -3229,6 +3237,38 @@ async def slash_apps(interaction: discord.Interaction):
 
 
 HANDS["open_app"] = hand_open_app
+
+# ============================================================
+# 👆 มือจอ: ส่งคำสั่งแตะพิกัดไปยัง MacroDroid/Hermes webhook เดิม
+# รูปแบบ: "แตะ 500 1200" / "กด 500,1200"
+# ============================================================
+def hand_tap(text=""):
+    if not MACRODROID_TAP_WEBHOOK_URL:
+        return "❌ มือแตะจอยังไม่ได้ผูกกับ MacroDroid webhook ครับ"
+    m = re.search(r"(?:แตะ|กด|tap)\s*[:(]?\s*(\d{1,4})\s*[,xX\s]\s*(\d{1,4})", str(text))
+    if not m:
+        return "พิมพ์พิกัดแบบนี้ครับ: แตะ 500 1200"
+    x, y = int(m.group(1)), int(m.group(2))
+    if x > 3000 or y > 3000:
+        return "❌ พิกัดจอสูงเกินช่วงที่รองรับครับ"
+    try:
+        from urllib.request import Request, urlopen
+        from urllib.parse import urlencode
+        sep = "&" if "?" in MACRODROID_TAP_WEBHOOK_URL else "?"
+        url = MACRODROID_TAP_WEBHOOK_URL + sep + urlencode({"x": x, "y": y, "action": "tap"})
+        body = json.dumps({"action": "tap", "x": x, "y": y}).encode("utf-8")
+        req = Request(url, data=body, headers={"Content-Type": "application/json"},
+                      method="POST")
+        with urlopen(req, timeout=20) as resp:
+            code = getattr(resp, "status", 200)
+        if 200 <= int(code) < 300:
+            return f"👆 แตะจอที่ ({x},{y}) แล้วครับ"
+        return f"❌ MacroDroid ตอบกลับ HTTP {code} ครับ"
+    except Exception as e:
+        return f"❌ ส่งคำสั่งแตะจอไม่สำเร็จ: {str(e)[:120]}"
+
+HANDS["tap"] = hand_tap
+
 
 
 # ============================================================
