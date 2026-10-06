@@ -714,7 +714,7 @@ def fallback_intent(text):
         return "sheet_push", text
     if any(k in t for k in ("รูปงาน", "timestamp", "ไทม์สแตมป์", "ไทม์แสตมป์")):
         return "open_app", text
-    m_tap = re.search(r"(?:แตะ|กด|tap)\\s*[:(]?\\s*(\\d{1,4})\\s*[,xX\\s]\\s*(\\d{1,4})", t)
+    m_tap = re.search(r"(?:แตะ|กด|tap)\s*[:(]?\s*(\d{1,4})\s*[,xX\s]\s*(\d{1,4})", t)
     if m_tap and len(t) < 80:
         return "tap", text
     if any(k in t for k in ("รายชื่อแอป", "แอปในเครื่อง", "แอปที่ติดตั้ง")):
