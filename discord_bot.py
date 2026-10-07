@@ -156,6 +156,7 @@ try:
     import device_actions
     HANDS["check_battery"] = lambda t: device_actions.check_battery()
     HANDS["open_youtube"] = lambda t: device_actions.open_youtube()
+    HANDS["click_text"] = lambda t: device_actions.hand_click_text(t)
 except Exception as e:
     log.warning("device_actions ใช้ไม่ได้ (%s) — ปิดมือแบต/ยูทูป", e)
 
@@ -584,6 +585,7 @@ SYSTEM_PROMPT = """คุณคือ Jarvis AI ผู้ช่วยส่ว�
 - "contacts"       : หาเบอร์จากสมุดโทรศัพท์ในเครื่องจริง — action_text "หาเบอร์ <ชื่อ>"
 - "applist"        : ขอดูรายชื่อแอปที่ติดตั้งในเครื่อง
 - "open_app"       : เปิดแอปบนมือถือ — รู้จัก "รูปงาน"/"timestamp" (แอป Timestamp Camera ถ่ายรูปประทับเวลา) ด้วย — action_text เป็นชื่อแอป เช่น "youtube", "facebook", "line", "tiktok", "instagram", "shopee", "gmail", "maps" (ถ้าขอเปิดแอปธนาคาร ปฏิเสธสุภาพ ๆ เพื่อความปลอดภัย)
+- "click_text"     : กดข้อความที่มองเห็นบนหน้าจอมือถือ เช่น "กด ค้นหา", "กด ตกลง", "คลิก ยกเลิก"
 - "location"      : ถามว่าฉันอยู่ที่ไหน/ตำแหน่งปัจจุบัน/พิกัด
 
 เมื่อมี action ให้ reply สั้น ๆ ว่ากำลังทำให้ (เช่น "กำลังเช็คให้ครับ")
@@ -778,6 +780,18 @@ memories = {}
 
 async def process_message(user_text, channel_id, images=None):
     """สมอง + มือ ทำงานร่วมกัน — คืน (ข้อความ, ควรพูดไหม)"""
+    # 🖱️ คำสั่งกดข้อความต้องผ่านมือทันที ห้ามเข้า AI
+    t = user_text.strip().lower()
+    m_click = re.match(r"^(?:กด|คลิก|แตะ)s+(.+)$", user_text.strip(), re.I)
+    if m_click and not re.fullmatch(r"d+s+d+", m_click.group(1).strip()):
+        target = m_click.group(1).strip()
+        log.info("🖱️ คำสั่งกดข้อความโดยตรง: %s", target)
+        try:
+            return await asyncio.to_thread(HANDS["click_text"], user_text.strip()), False, None
+        except Exception as e:
+            log.error("Click text error: %s", e)
+            return f"❌ กดข้อความไม่สำเร็จ: {str(e)[:120]}", False, None
+
     # คำสั่งเสียงด่วน (เช็ค "เปิดเสียง" ก่อน "ปิดเสียง" เพราะ "เปิดเสียง" มี "ปิดเสียง" ซ่อนอยู่!)
     t = user_text.strip().lower()
     if "เปิดเสียง" in t or "เปิดเสียงหน่อย" in t or "เปิด เสียง" in t:
@@ -1337,7 +1351,8 @@ def restart_bot():
 
 
 async def _auto_update_task():
-    """เช็คเวอร์ชันใหม่: ครั้งแรกหลังเปิด 45 วิ จากนั้นทุก 6 ชั่วโมง"""
+    """ปิดการอัปเดตอัตโนมัติไว้ก่อน เพื่อไม่ให้ทับการแก้เฉพาะเครื่อง; /update ยังใช้ได้เมื่อสั่งเอง"""
+    return
     await asyncio.sleep(45)
     while True:
         try:
