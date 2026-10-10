@@ -1575,6 +1575,8 @@ def _parse_job_text(text):
                     and not re.match(r"^\d{1,2}/\d{1,2}/\d{2,4}\b", first)
                     and not re.fullmatch(coord_re, first)):
                 data["customer"] = re.sub(r"^\d+\.\s*", "", first)[:80]
+    if data["total_len"] is None and data["start_len"] is not None and data["end_len"] is not None:
+        data["total_len"] = data["end_len"] - data["start_len"]
     return data
 
 
