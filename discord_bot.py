@@ -1529,7 +1529,7 @@ def _parse_job_text(text):
                r"order|detail|device|status|router|olt|onu|customer|address|location|"
                r"package|service|name|note|remark)")
 
-    coord_re =    coord_re = r"\s*\d{1,3}\.\d{3,}\s*,?\s*\d{1,3}\.\d{3,}\s*"
+    coord_re = r"\s*\d{1,3}\.\d{3,}\s*,?\s*\d{1,3}\.\d{3,}\s*"
 
     def _is_name_like(v):
         v = (v or "").strip()
