@@ -1413,11 +1413,18 @@ def _parse_job_text(text):
             "start_len": None, "end_len": None, "total_len": None, "extra": {}}
     ex = data["extra"]
 
-    # 0) ล้าง markdown ที่ตาอ่านรูป (Gemini) ชอบแถมมา เช่น "#### ข้อมูลของ order", "**ชื่อ**"
-    #    ไม่งั้นหัวข้อพวกนี้จะหลุดไปเป็น "ชื่อลูกค้า" (เคยพังมาแล้ว)
-    text = re.sub(r"^[ \t]*#{1,6}[ \t]*", "", text or "", flags=re.M)
-    text = re.sub(r"\*\*|__|`", "", text)
-    text = re.sub(r"^[ \t]*[-•][ \t]+", "", text, flags=re.M)
+    # 0) ล้างคำเกริ่นจาก AI/OCR และ Markdown ก่อนแยกฟิลด์ ป้องกันคำอธิบายกลายเป็นชื่อลูกค้า
+    text = text or ""
+    intro_re = re.compile(
+        r"^(?:นี่คือข้อความทั้งหมดที่ถอด|ข้อความทั้งหมดที่ถอด|ข้อความที่ถอดจาก|"
+        r"ต่อไปนี้คือข้อความ|จากภาพ(?:นี้)?อ่านข้อความ|ฉันถอดข้อความ|ฉันจะรักษา|"
+        r"รักษาป้ายกำกับ|ป้ายกำกับ.*ค่า|คงป้ายกำกับ|ข้อความธรรมดา|"
+        r"ผลการอ่าน(?:ภาพ|รูป)|คำถอดข้อความ|นี่คือข้อมูลที่อ่านได้)", re.I)
+    text = "\\n".join(line for line in text.splitlines()
+                      if not intro_re.match(line.strip().lstrip("#*` ")))
+    text = re.sub(r"^[ \\t]*#{1,6}[ \\t]*", "", text, flags=re.M)
+    text = re.sub(r"\\*\\*|__|`", "", text)
+    text = re.sub(r"^[ \\t]*[-•][ \\t]+", "", text, flags=re.M)
 
     # 1) หัวแบบ "1. ชื่อ (09:00 - 12:00) — ประเภทงาน"
     m = re.search(r"^\s*\d+\.\s*(.+?)(?:\s*\(([^)]*)\))?\s*[—–-]+\s*(.+)$",
@@ -1429,10 +1436,15 @@ def _parse_job_text(text):
         data["jtype"] = m.group(3).strip()
 
     # 2) ฟิลด์แบบ "* คีย์: ค่า"
-    keymap = {"ที่อยู่": "address", "เบอร์โทร": "phone", "circuit": "circuit",
+    keymap = {"ที่อยู่": "address", "address": "address",
+              "เบอร์โทร": "phone", "เบอร์โทรศัพท์": "phone", "phone": "phone", "tel": "phone",
+              "circuit": "circuit", "วงจร": "circuit", "เลขวงจร": "circuit", "หมายเลขวงจร": "circuit",
+              "ชื่อลูกค้า": "customer", "ชื่อ-นามสกุล": "customer", "customer": "customer", "name": "customer",
+              "ประเภทงาน": "jtype", "job type": "jtype", "jtype": "jtype",
               "ระยะสายเริ่มต้น": "start_len", "ระยะสายสิ้นสุด": "end_len",
               "ระยะสายรวมทั้งหมด": "total_len"}
-    for km in re.finditer(r"^[ \t]*\*[ \t]*([^:\n]+?)[ \t]*:[ \t]*(.*)$", text, re.M):
+    # รองรับป้ายกำกับที่มีหรือไม่มี bullet นำหน้า
+    for km in re.finditer(r"^[ \\t]*(?:[*•-][ \\t]*)?([^:\\n]+?)[ \\t]*:[ \\t]*(.*)$", text, re.M):
         k = km.group(1).strip()
         v = km.group(2).strip()
         tgt = keymap.get(k.lower())
@@ -1512,9 +1524,12 @@ def _parse_job_text(text):
     # 10) ชื่อสำรอง — ไล่จากแน่ใจมาก → น้อย
     skip_re = (r"^(เลขที่|ลูกค้า|ที่อยู่|เบอร์โทร|ชื่อ|รายละเอียด|สถานะ|หมายเหตุ|หมายเลข|"
                r"ข้อมูล|ประเภท|วันที่|วันเวลา|เวลา|พิกัด|แพ็กเกจ|แพคเกจ|บริการ|ความเร็ว|"
+               r"นี่คือข้อความ|ข้อความทั้งหมดที่ถอด|ข้อความที่ถอด|ต่อไปนี้คือ|จากภาพ|ผลการอ่าน|ถอดข้อความ|"
+               r"ฉันจะรักษา|รักษาป้ายกำกับ|ป้ายกำกับ|ข้อความธรรมดา|"
                r"order|detail|device|status|router|olt|onu|customer|address|location|"
                r"package|service|name|note|remark)")
-    coord_re = r"\s*\d{1,3}\.\d{3,}\s*,?\s*\d{1,3}\.\d{3,}\s*"
+
+    coord_re =    coord_re = r"\s*\d{1,3}\.\d{3,}\s*,?\s*\d{1,3}\.\d{3,}\s*"
 
     def _is_name_like(v):
         v = (v or "").strip()
@@ -1788,6 +1803,13 @@ class JobPasteModal(discord.ui.Modal, title="📥 วางข้อความ
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         d = _parse_job_text(str(self.blob.value))
+        if not any(str(d.get(k) or "").strip() for k in
+                   ("customer", "jtype", "address", "phone", "circuit")):
+            await interaction.followup.send(
+                "❌ ยังแยกรายละเอียดงานไม่เจอ จึงไม่ได้บันทึกข้อมูลขยะครับ\\n"
+                "ลองวางข้อความ Order Detail ที่มีชื่อลูกค้า/เลขวงจร/ที่อยู่ แล้วส่งใหม่",
+                ephemeral=True)
+            return
         jid = _jobs_add(d)
         j = _jobs_get(jid)
         dist = await asyncio.to_thread(_job_dist_text, j)
