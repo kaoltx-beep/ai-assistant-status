@@ -4226,7 +4226,7 @@ def _job_capture_from_ocr(img_bytes, content_type="image/jpeg"):
     # อย่าถือหัวข้อฟิลด์ที่ OCR อ่านผิดเป็นชื่อลูกค้า
     customer = (d.get("customer") or "").strip() if d else ""
     if customer and re.match(
-            r"^[*•\-\s]*(เวลานัด|วันเวลา|เวลา|ที่อยู่|เบอร์โทร|หมายเลขวงจร|วงจร|ประเภทงาน)\\s*[:：]?$",
+            r"^[*•\-\s]*(เวลานัด|วันเวลา|เวลา|ที่อยู่|เบอร์โทร|หมายเลขวงจร|วงจร|ประเภทงาน)\s*[:：]?$",
             customer, re.I):
         d["customer"] = ""
     ok = bool(d and (d.get("customer") or d.get("address") or d.get("phone")))
