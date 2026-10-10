@@ -1420,11 +1420,11 @@ def _parse_job_text(text):
         r"ต่อไปนี้คือข้อความ|จากภาพ(?:นี้)?อ่านข้อความ|ฉันถอดข้อความ|ฉันจะรักษา|"
         r"รักษาป้ายกำกับ|ป้ายกำกับ.*ค่า|คงป้ายกำกับ|ข้อความธรรมดา|"
         r"ผลการอ่าน(?:ภาพ|รูป)|คำถอดข้อความ|นี่คือข้อมูลที่อ่านได้)", re.I)
-    text = "\\n".join(line for line in text.splitlines()
+    text = "\n".join(line for line in text.splitlines()
                       if not intro_re.match(line.strip().lstrip("#*` ")))
-    text = re.sub(r"^[ \\t]*#{1,6}[ \\t]*", "", text, flags=re.M)
-    text = re.sub(r"\\*\\*|__|`", "", text)
-    text = re.sub(r"^[ \\t]*[-•][ \\t]+", "", text, flags=re.M)
+    text = re.sub(r"^[ \t]*#{1,6}[ \t]*", "", text, flags=re.M)
+    text = re.sub(r"\*\*|__|`", "", text)
+    text = re.sub(r"^[ \t]*[-•][ \t]+", "", text, flags=re.M)
 
     # 1) หัวแบบ "1. ชื่อ (09:00 - 12:00) — ประเภทงาน"
     m = re.search(r"^\s*\d+\.\s*(.+?)(?:\s*\(([^)]*)\))?\s*[—–-]+\s*(.+)$",
@@ -1444,7 +1444,7 @@ def _parse_job_text(text):
               "ระยะสายเริ่มต้น": "start_len", "ระยะสายสิ้นสุด": "end_len",
               "ระยะสายรวมทั้งหมด": "total_len"}
     # รองรับป้ายกำกับที่มีหรือไม่มี bullet นำหน้า
-    for km in re.finditer(r"^[ \\t]*(?:[*•-][ \\t]*)?([^:\\n]+?)[ \\t]*:[ \\t]*(.*)$", text, re.M):
+    for km in re.finditer(r"^[ \t]*(?:[*•-][ \t]*)?([^:\n]+?)[ \t]*:[ \t]*(.*)$", text, re.M):
         k = km.group(1).strip()
         v = km.group(2).strip()
         tgt = keymap.get(k.lower())
@@ -1806,7 +1806,7 @@ class JobPasteModal(discord.ui.Modal, title="📥 วางข้อความ
         if not any(str(d.get(k) or "").strip() for k in
                    ("customer", "jtype", "address", "phone", "circuit")):
             await interaction.followup.send(
-                "❌ ยังแยกรายละเอียดงานไม่เจอ จึงไม่ได้บันทึกข้อมูลขยะครับ\\n"
+                "❌ ยังแยกรายละเอียดงานไม่เจอ จึงไม่ได้บันทึกข้อมูลขยะครับ\n"
                 "ลองวางข้อความ Order Detail ที่มีชื่อลูกค้า/เลขวงจร/ที่อยู่ แล้วส่งใหม่",
                 ephemeral=True)
             return
