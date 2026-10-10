@@ -4226,7 +4226,7 @@ def _job_capture_from_ocr(img_bytes, content_type="image/jpeg"):
     # อย่าถือหัวข้อฟิลด์ที่ OCR อ่านผิดเป็นชื่อลูกค้า
     customer = (d.get("customer") or "").strip() if d else ""
     if customer and re.match(
-            r"^[*•\\-\\s]*(เวลานัด|วันเวลา|เวลา|ที่อยู่|เบอร์โทร|หมายเลขวงจร|วงจร|ประเภทงาน)\\s*[:：]?$",
+            r"^[*•\-\s]*(เวลานัด|วันเวลา|เวลา|ที่อยู่|เบอร์โทร|หมายเลขวงจร|วงจร|ประเภทงาน)\\s*[:：]?$",
             customer, re.I):
         d["customer"] = ""
     ok = bool(d and (d.get("customer") or d.get("address") or d.get("phone")))
@@ -4272,10 +4272,10 @@ class JobImgConfirm(discord.ui.View):
             head = f"✅ บันทึกเป็นงาน **#{jid} {who}** แล้วครับ!"
             dist = await asyncio.to_thread(_job_dist_text, self.d)
             if dist:
-                head += "\\n" + dist
+                head += "\n" + dist
             if not also_customer:
                 await interaction.edit_original_response(
-                    content=head + "\\nดูทั้งหมดที่ /job — ถ้าเป็นงานวันนี้ก็จะขึ้นใน /today ด้วย",
+                    content=head + "\nดูทั้งหมดที่ /job — ถ้าเป็นงานวันนี้ก็จะขึ้นใน /today ด้วย",
                     view=None)
                 return
             d = self.d
@@ -4451,7 +4451,7 @@ async def on_message(message: discord.Message):
                     "📸 อ่านรูปงานได้แล้ว — เช็คความถูกต้องก่อนกดบันทึกนะครับ:",
                     f"📸 อ่านรูปและบันทึกอัตโนมัติแล้ว — งาน #{jid}")
                 await message.channel.send(
-                    f"✅ **บันทึกงาน #{jid} เรียบร้อยแล้ว**\\n{preview}\\n"
+                    f"✅ **บันทึกงาน #{jid} เรียบร้อยแล้ว**\n{preview}\n"
                     "🗑️ ถ้าต้องการลบภายหลัง พิมพ์ **/job** แล้วกดปุ่ม **ลบงาน** ได้ครับ")
             except Exception as e:
                 log.exception("บันทึกงานจากรูปอัตโนมัติไม่สำเร็จ")
@@ -4459,8 +4459,8 @@ async def on_message(message: discord.Message):
         else:
             await message.channel.send(
                 "⚠️ อ่านรูปแล้ว แต่ข้อมูลยังไม่ชัดพอ จึงยังไม่บันทึกเพื่อกันงานผิด "
-                "ลองแนบรูปใหม่ที่เห็นชื่อ/ที่อยู่/เบอร์ หรือก๊อปข้อความมาวางใน /job\\n\\n"
-                "ข้อความที่อ่านได้:\\n" + (ocr or "")[:600])
+                "ลองแนบรูปใหม่ที่เห็นชื่อ/ที่อยู่/เบอร์ หรือก๊อปข้อความมาวางใน /job\n\n"
+                "ข้อความที่อ่านได้:\n" + (ocr or "")[:600])
         return
 
     # 📸 แนบรูปมาเฉย ๆ → ถามด้วยปุ่ม (กำกวมต้องถามเสมอ)
