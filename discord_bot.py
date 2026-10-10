@@ -4223,6 +4223,12 @@ def _job_capture_from_ocr(img_bytes, content_type="image/jpeg"):
     """อ่านรูปด้วยตา → แยกเป็นงาน — คืน (job_dict|None, ข้อความที่อ่านได้)"""
     ocr = ocr_image(img_bytes, content_type, _JOB_CAPTURE_Q) or ""
     d = _parse_job_text(ocr)
+    # อย่าถือหัวข้อฟิลด์ที่ OCR อ่านผิดเป็นชื่อลูกค้า
+    customer = (d.get("customer") or "").strip() if d else ""
+    if customer and re.match(
+            r"^[*•\\-\\s]*(เวลานัด|วันเวลา|เวลา|ที่อยู่|เบอร์โทร|หมายเลขวงจร|วงจร|ประเภทงาน)\\s*[:：]?$",
+            customer, re.I):
+        d["customer"] = ""
     ok = bool(d and (d.get("customer") or d.get("address") or d.get("phone")))
     return (d if ok else None), ocr
 
@@ -4258,33 +4264,44 @@ class JobImgConfirm(discord.ui.View):
         self.d = d
 
     async def _save(self, interaction, also_customer):
-        jid = await asyncio.to_thread(_jobs_add, self.d)
-        who = (self.d.get("customer") or "").strip()
-        head = f"✅ บันทึกเป็นงาน **#{jid} {who}** แล้วครับ!"
-        dist = await asyncio.to_thread(_job_dist_text, self.d)
-        if dist:
-            head += "\n" + dist
-        if not also_customer:
-            await interaction.response.edit_message(
-                content=head + "\nดูทั้งหมดที่ /job — ถ้าเป็นงานวันนี้ก็จะขึ้นใน /today ด้วย",
+        # รับ interaction ทันที ไม่ให้ Discord หมดเวลา 3 วินาทีระหว่างบันทึก DB/คำนวณระยะ
+        await interaction.response.defer()
+        try:
+            jid = await asyncio.to_thread(_jobs_add, self.d)
+            who = (self.d.get("customer") or "").strip()
+            head = f"✅ บันทึกเป็นงาน **#{jid} {who}** แล้วครับ!"
+            dist = await asyncio.to_thread(_job_dist_text, self.d)
+            if dist:
+                head += "\\n" + dist
+            if not also_customer:
+                await interaction.edit_original_response(
+                    content=head + "\\nดูทั้งหมดที่ /job — ถ้าเป็นงานวันนี้ก็จะขึ้นใน /today ด้วย",
+                    view=None)
+                return
+            d = self.d
+            name = (d.get("customer") or "").strip()
+            if not name:
+                await interaction.edit_original_response(
+                    content=f"✅ บันทึกเป็นงาน **#{jid}** แล้วครับ — แต่ไม่มีชื่อลูกค้า "
+                            "ในรูป เลยลงสมุดลูกค้าไม่ได้นะครับ",
+                    view=None)
+                return
+            await asyncio.to_thread(
+                _cust_add, name, (d.get("phone") or "").strip(),
+                (d.get("address") or "").strip(), "จากงาน #" + str(jid))
+            await interaction.edit_original_response(
+                content=head + " (ลงสมุดลูกค้าด้วยแล้ว) "
+                        f"ต่อไปพิมพ์ **นำทางไป{name[:30]}** หรือ **โทร{d.get('phone') or '...'}** "
+                        "ก็ใช้ได้เลย",
                 view=None)
-            return
-        d = self.d
-        name = (d.get("customer") or "").strip()
-        if not name:
-            await interaction.response.edit_message(
-                content=f"✅ บันทึกเป็นงาน **#{jid}** แล้วครับ — แต่ไม่มีชื่อลูกค้า "
-                        "ในรูป เลยลงสมุดลูกค้าไม่ได้นะครับ",
-                view=None)
-            return
-        cid = await asyncio.to_thread(
-            _cust_add, name, (d.get("phone") or "").strip(),
-            (d.get("address") or "").strip(), "จากงาน #" + str(jid))
-        await interaction.response.edit_message(
-            content=head + " (ลงสมุดลูกค้าด้วยแล้ว) "
-                    f"ต่อไปพิมพ์ **นำทางไป{name[:30]}** หรือ **โทร{d.get('phone') or '...'}** "
-                    "ก็ใช้ได้เลย",
-            view=None)
+        except Exception as e:
+            log.exception("บันทึกงานจากรูปไม่สำเร็จ")
+            try:
+                await interaction.edit_original_response(
+                    content=f"❌ บันทึกงานไม่สำเร็จ: {str(e)[:180]}",
+                    view=None)
+            except Exception:
+                pass
 
     @discord.ui.button(label="บันทึกเป็นงาน", emoji="✅",
                        style=discord.ButtonStyle.success)
