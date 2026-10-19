@@ -69,21 +69,34 @@ scan_ports() {
 }
 
 run_connections() {
+  # Accepts either full "IP:PORT" strings or bare port numbers.
   local ip="$1"; shift
-  local found=0
-  local hosts
-  if [ "$ip" = "127.0.0.1" ]; then hosts="127.0.0.1"; else hosts="$ip 127.0.0.1"; fi
-  for port in "$@"; do
-    [ -n "$port" ] || continue
-    for host in $hosts; do
-      target="${host}:${port}"
-      printf "  %-24s " "$target"
-      out=$(adb connect "$target" 2>&1)
-      case "$out" in
-        *connected*|*"already connected"*) printf "${GREEN}✓ %s${OFF}\n" "$out"; found=1 ;;
-        *)                                 printf "${DIM}%s${OFF}\n" "$out" ;;
-      esac
-    done
+  local hosts found=0 item target out
+  if [ -z "$ip" ] || [ "$ip" = "127.0.0.1" ]; then hosts="127.0.0.1"; else hosts="$ip 127.0.0.1"; fi
+
+  for item in "$@"; do
+    [ -n "$item" ] || continue
+    case "$item" in
+      *:*)
+        printf "  %-24s " "$item"
+        out=$(adb connect "$item" 2>&1)
+        case "$out" in
+          *connected*|*"already connected"*) printf "${GREEN}✓ %s${OFF}\n" "$out"; found=1 ;;
+          *)                                 printf "${DIM}%s${OFF}\n" "$out" ;;
+        esac
+        ;;
+      *)
+        for host in $hosts; do
+          target="${host}:${item}"
+          printf "  %-24s " "$target"
+          out=$(adb connect "$target" 2>&1)
+          case "$out" in
+            *connected*|*"already connected"*) printf "${GREEN}✓ %s${OFF}\n" "$out"; found=1 ;;
+            *)                                 printf "${DIM}%s${OFF}\n" "$out" ;;
+          esac
+        done
+        ;;
+    esac
   done
   return $((1 - found))
 }
@@ -111,8 +124,28 @@ if adb devices 2>/dev/null | tail -n +2 | grep -qE '[[:space:]]device$'; then
   exit 0
 fi
 
-# ---- 2) อ่านพอร์ตจาก /proc ------------------------------------------------
-say "1) ตรวจพอร์ตที่เปิดอยู่บนเครื่อง"
+# ---- 2) mDNS (เร็วที่สุด ~5 วินาที) ---------------------------------------
+say "1) ค้นหาผ่าน mDNS"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "$PWD")"
+if command -v python >/dev/null 2>&1 && [ -f "${SCRIPT_DIR}/find_port.py" ]; then
+  MDNS_OUT=$(python "${SCRIPT_DIR}/find_port.py" 2>&1 || true)
+  MDNS_TARGETS=$(printf '%s\n' "$MDNS_OUT" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$' || true)
+  if [ -n "$MDNS_TARGETS" ]; then
+    printf "  เจอ: %s\n" "$(printf '%s' "$MDNS_TARGETS" | tr '\n' ' ')"
+    if run_connections "" $MDNS_TARGETS; then
+      say "ผลลัพธ์"; adb devices | tail -n +2 | sed 's/^/  /'
+      ok "เชื่อมต่อสำเร็จ"
+      exit 0
+    fi
+  else
+    warn "mDNS ไม่พบอุปกรณ์ — จะลองวิธีอื่นต่อ"
+  fi
+else
+  warn "ไม่มี python / find_port.py — ข้าม mDNS"
+fi
+
+# ---- 3) อ่านพอร์ตจาก /proc ------------------------------------------------
+say "2) ตรวจพอร์ตที่เปิดอยู่บนเครื่อง"
 PROC_PORTS=$(ports_from_proc "$PORT_START" "$PORT_END" || true)
 if [ -n "$PROC_PORTS" ]; then
   printf "  เจอ: %s\n" "$(printf '%s' "$PROC_PORTS" | tr '\n' ' ')"
@@ -127,7 +160,7 @@ else
 fi
 
 # ---- 3) สแกน --------------------------------------------------------------
-say "2) สแกนพอร์ต ${PORT_START}-${PORT_END}"
+say "3) สแกนพอร์ต ${PORT_START}-${PORT_END}"
 printf "  ${DIM}ใช้เวลาราว 1-3 นาที ปล่อยให้ทำงาน${OFF}\n"
 
 OPEN=$(scan_ports "$IP" "$PORT_START" "$PORT_END" || true)
@@ -154,7 +187,7 @@ fi
 
 printf "  เจอพอร์ต: %s\n" "$(printf '%s' "$OPEN" | tr '\n' ' ')"
 
-say "3) ลองเชื่อมต่อ"
+say "4) ลองเชื่อมต่อ"
 run_connections "$IP" $OPEN || true
 
 say "ผลลัพธ์"

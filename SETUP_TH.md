@@ -110,13 +110,22 @@ bash connect.sh
 ลำดับที่สคริปต์ลองให้:
 
 1. ปิด-เปิด adb server
-2. ค้นหาผ่าน mDNS (`adb mdns services`)
-3. **สแกนพอร์ตเอง** (`bash find_port.sh`) — ใช้เมื่อ adb ไม่รองรับ mDNS
-4. ถาม IP:พอร์ตจากคุณเป็นทางสุดท้าย
+2. ค้นหาผ่าน mDNS — **สองทาง**: `adb mdns services` และ `find_port.py` (ถาม mDNS เองด้วย Python)
+3. อ่านพอร์ตที่ listen อยู่จาก `/proc/net/tcp`
+4. สแกนพอร์ต 30000–65535 (~1–3 นาที)
+5. ถาม IP:พอร์ตจากคุณเป็นทางสุดท้าย
 
 > ⚠️ adb ใน Termux บางเวอร์ชัน (เช่น 37.0.0p1-2) **ไม่รองรับ mDNS** จะขึ้น
-> `adb: mdns is not supported by this version of adb.` → สคริปต์จะสแกนพอร์ตให้แทน
-> (ใช้เวลาราว 1–2 นาที)
+> `adb: mdns is not supported by this version of adb.`
+> แต่ Android ยังประกาศบริการ `_adb-tls-connect._tcp` อยู่ → `find_port.py`
+> จะถามเองด้วย UDP multicast แล้วได้พอร์ตมาใน ~5 วินาที
+
+**หาเฉพาะพอร์ต (ไม่เชื่อมต่อ):**
+
+```bash
+python find_port.py                 # พิมพ์ 192.168.1.156:37223
+python find_port.py --connect       # หาแล้วสั่ง adb connect ให้เลย
+```
 
 > 💡 **สาเหตุที่พบบ่อยสุด:** พอร์ตเชื่อมต่อเปลี่ยนทุกครั้งที่เปิด-ปิด Wireless debugging
 > รหัส pair ที่เคยใช้ได้จึงไม่เกี่ยวกับพอร์ตที่ต้อง connect
