@@ -71,9 +71,11 @@ scan_ports() {
 run_connections() {
   local ip="$1"; shift
   local found=0
+  local hosts
+  if [ "$ip" = "127.0.0.1" ]; then hosts="127.0.0.1"; else hosts="$ip 127.0.0.1"; fi
   for port in "$@"; do
     [ -n "$port" ] || continue
-    for host in "$ip" 127.0.0.1; do
+    for host in $hosts; do
       target="${host}:${port}"
       printf "  %-24s " "$target"
       out=$(adb connect "$target" 2>&1)
