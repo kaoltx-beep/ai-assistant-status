@@ -213,9 +213,58 @@ def discover() -> list[tuple[str, int]]:
 
 
 # ---------------------------------------------------------------------------
+def adb_devices() -> str:
+    try:
+        proc = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=20)
+        return proc.stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def device_is_online(text: str) -> bool:
+    for line in text.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "device":
+            return True
+    return False
+
+
+def try_connect(hosts: list[str], port: int) -> tuple[bool, str]:
+    """Try adb connect for each host; return (ok, last_output)."""
+    last = ""
+    for host in hosts:
+        target = f"{host}:{port}"
+        print(f"ลอง {target} ...", flush=True)
+        try:
+            proc = subprocess.run(
+                ["adb", "connect", target], capture_output=True, text=True, timeout=25
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            last = str(exc)
+            print(f"  {last}")
+            continue
+
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+        last = out or err
+        if last:
+            print(f"  {last}")
+
+        lowered = last.lower()
+        if "connected" in lowered and "failed" not in lowered and "cannot" not in lowered:
+            if device_is_online(adb_devices()):
+                return True, last
+        if "unauthorized" in lowered:
+            print("  → ดูหน้าจอมือถือ กด Allow")
+        if "refused" in lowered:
+            print("  → พอร์ตนี้ไม่มีอะไรรอรับ (อาจเก่าไปแล้ว)")
+    return False, last
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="หา ADB wireless port ผ่าน mDNS")
     parser.add_argument("--connect", action="store_true", help="สั่ง adb connect ให้เลย")
+    parser.add_argument("--ip", default="", help="ระบุ IP เอง (ปกติตรวจอัตโนมัติ)")
     parser.add_argument("--timeout", type=float, default=2.5)
     args = parser.parse_args(argv)
 
@@ -229,14 +278,21 @@ def main(argv: list[str] | None = None) -> int:
     for ip, port in pairs:
         print(f"{ip}:{port}")
 
-    if args.connect:
-        for ip, port in pairs:
-            target = f"{ip}:{port}"
-            proc = subprocess.run(["adb", "connect", target], capture_output=True, text=True)
-            print(proc.stdout.strip() or proc.stderr.strip())
-        subprocess.run(["adb", "devices"], check=False)
+    if not args.connect:
+        return 0
 
-    return 0
+    # Termux runs on the phone itself: the loopback route often works when the
+    # LAN route does not (and vice versa), so try both for every discovered port.
+    for ip, port in pairs:
+        hosts = ["127.0.0.1", ip] if ip != "127.0.0.1" else ["127.0.0.1"]
+        ok, _ = try_connect(hosts, port)
+        if ok:
+            print("\n✓ เชื่อมต่อสำเร็จ")
+            print(adb_devices().strip())
+            return 0
+
+    print("\n✗ เชื่อมต่อไม่สำเร็จทุกพอร์ตที่เจอ", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
