@@ -173,38 +173,106 @@ fi
 
 # ---------------------------------------------------------------------------
 say "เชื่อมต่อ"
+
+# หลัง pair adbd จะเปิด listener ใหม่ พอร์ตเก่าที่ mDNS ประกาศไว้มักใช้ไม่ได้แล้ว
+q "รอ 2 วินาทีให้ adbd เปิดพอร์ตใหม่ ..."
+sleep 2
 adb kill-server >/dev/null 2>&1 || true
 adb start-server >/dev/null 2>&1 || true
 
-PORTS=$(mdns_ports)
-[ -z "$PORTS" ] && PORTS=$(scan_ports "${PAIR_PORT:-}")
-if [ -n "${PAIR_PORT:-}" ]; then
-  PORTS=$(printf '%s\n' $PORTS | grep -vx "$PAIR_PORT" | tr '\n' ' ')
+# เก็บพอร์ตที่ "เปิดจริง" เท่านั้น — mDNS มักประกาศพอร์ตเก่าค้างไว้
+probe_open() {  # $1 = port ; คืน 0 ถ้ามีใครฟังอยู่
+  local h
+  for h in "$IP" 127.0.0.1; do
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 2 bash -c "exec 3<>/dev/tcp/$h/$1" 2>/dev/null && return 0
+    else
+      (exec 3<>"/dev/tcp/$h/$1") 2>/dev/null && return 0
+    fi
+  done
+  return 1
+}
+
+MDNS_LIST=$(mdns_ports)
+LIVE_PORTS=""
+if [ -n "$MDNS_LIST" ]; then
+  for p in $MDNS_LIST; do
+    [ "$p" = "${PAIR_PORT:-}" ] && continue
+    probe_open "$p" && LIVE_PORTS="$LIVE_PORTS $p"
+  done
+  if [ -n "$LIVE_PORTS" ]; then
+    q "mDNS ประกาศ: $(printf '%s\n' $MDNS_LIST | tr '\n' ' ') → ที่เปิดจริง:$(printf '%s' "$LIVE_PORTS" | tr -s ' ')"
+  else
+    q "mDNS ประกาศ $(printf '%s\n' $MDNS_LIST | tr '\n' ' ') แต่ไม่มีตัวไหนเปิดอยู่ (พอร์ตเก่า)"
+  fi
 fi
 
-if [ -z "${PORTS:-}" ]; then
-  printf "  หาพอร์ต connect ไม่เจอ — พิมพ์เอง (เช่น 41087): "
-  read -r PORTS || true
+# สแกนเสมอถ้าไม่มีพอร์ตที่เปิดจริง
+if [ -z "$LIVE_PORTS" ]; then
+  printf "  สแกนหาพอร์ตที่เปิดอยู่ ... "
+  SCANNED=$(scan_ports "${PAIR_PORT:-}")
+  if [ -n "$SCANNED" ]; then
+    printf "${GREEN}เจอ %s${OFF}\n" "$(printf '%s' "$SCANNED" | tr -s ' ')"
+    LIVE_PORTS="$SCANNED"
+  else
+    printf "${YELLOW}ไม่เจอ${OFF}\n"
+  fi
 fi
-q "พอร์ตที่จะลอง: $(printf '%s' "${PORTS:-}" | tr -s ' ')"
+
+if [ -z "$LIVE_PORTS" ]; then
+  printf "  หาพอร์ต connect ไม่เจอ — พิมพ์เอง (เช่น 41087): "
+  read -r MANUAL || true
+  LIVE_PORTS="$MANUAL"
+fi
+[ -z "${LIVE_PORTS// /}" ] && { bad "ไม่ได้พอร์ต connect"; exit 1; }
+q "พอร์ตที่จะลอง:$(printf '%s' "$LIVE_PORTS" | tr -s ' ')"
 
 HOSTS="$IP 127.0.0.1"
 [ "$IP" = "127.0.0.1" ] && HOSTS="127.0.0.1"
-for p in ${PORTS:-}; do
+
+CONNECTED=0
+for p in $LIVE_PORTS; do
   for host in $HOSTS; do
     printf "  %-24s " "${host}:${p}"
     OUT=$(timeout 20 adb connect "${host}:${p}" 2>&1 || true)
     printf "${DIM}%s${OFF}\n" "$OUT"
-    if online; then
-      say "ผลลัพธ์"
-      adb devices -l 2>/dev/null | sed 's/^/    /'
-      ok "เชื่อมต่อสำเร็จ"
-      printf "\n  เริ่มใช้งาน:\n    ${BOLD}python -m android_agent --check${OFF}\n"
-      printf "    ${BOLD}python -m android_agent \"เปิด Settings ดูเลข Android version\"${OFF}\n"
-      exit 0
-    fi
+    if online; then CONNECTED=1; break 2; fi
   done
 done
+
+# ถ้าต่อไม่ติดทั้งที่พอร์ตเปิดอยู่ ให้สแกนใหม่แล้วลองอีกรอบ
+if [ "$CONNECTED" = 0 ]; then
+  warn "ต่อไม่ติดกับพอร์ตที่ลองไป — สแกนใหม่แล้วลองอีกครั้ง"
+  printf "  สแกน ... "
+  RESCAN=$(scan_ports "${PAIR_PORT:-}")
+  NEW_PORTS=""
+  for p in $RESCAN; do
+    case " $LIVE_PORTS " in *" $p "*) continue ;; esac
+    NEW_PORTS="$NEW_PORTS $p"
+  done
+  if [ -n "${NEW_PORTS// /}" ]; then
+    printf "${GREEN}เจอเพิ่ม:%s${OFF}\n" "$(printf '%s' "$NEW_PORTS" | tr -s ' ')"
+    for p in $NEW_PORTS; do
+      for host in $HOSTS; do
+        printf "  %-24s " "${host}:${p}"
+        OUT=$(timeout 20 adb connect "${host}:${p}" 2>&1 || true)
+        printf "${DIM}%s${OFF}\n" "$OUT"
+        if online; then CONNECTED=1; break 2; fi
+      done
+    done
+  else
+    printf "${YELLOW}ไม่เจอพอร์ตใหม่${OFF}\n"
+  fi
+fi
+
+if [ "$CONNECTED" = 1 ]; then
+  say "ผลลัพธ์"
+  adb devices -l 2>/dev/null | sed 's/^/    /'
+  ok "เชื่อมต่อสำเร็จ"
+  printf "\n  เริ่มใช้งาน:\n    ${BOLD}python -m android_agent --check${OFF}\n"
+  printf "    ${BOLD}python -m android_agent \"เปิด Settings ดูเลข Android version\"${OFF}\n"
+  exit 0
+fi
 
 say "ผลลัพธ์"
 adb devices -l 2>/dev/null | sed 's/^/    /'
