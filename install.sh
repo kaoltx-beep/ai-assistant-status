@@ -21,6 +21,24 @@ IS_TERMUX=0
 # claim .../ensurepip/_bundled/pip-*.whl, so dpkg aborts with
 # "trying to overwrite ... which is also in package ...".
 # Force the new interpreter to take ownership, then let apt settle.
+# The pairing dialog shows the phone's LAN IP (e.g. 192.168.1.156), not
+# localhost. Accept either "PORT" or full "IP:PORT" from the user.
+wifi_ip() {
+  ip route 2>/dev/null | awk '/^default/ {print $9; exit}' \
+    || ifconfig 2>/dev/null | awk '/inet /{print $2; exit}' || true
+}
+
+# Turn "32887" into "192.168.1.156:32887" using the detected LAN IP.
+expand_hostport() {
+  input="$1"
+  fallback_ip="$2"
+  case "$input" in
+    *:*) printf '%s' "$input" ;;
+    *)   if [ -n "$fallback_ip" ]; then printf '%s:%s' "$fallback_ip" "$input"
+         else printf '127.0.0.1:%s' "$input"; fi ;;
+  esac
+}
+
 repair_termux_dpkg() {
   say "พบปัญหาแพ็กเกจชนกัน (ensurepip) — กำลังซ่อมให้"
   apt --fix-broken install -y || true
@@ -142,35 +160,40 @@ else
   ask "  ต้องการเชื่อมต่อเลยไหม? [y/N]: "
   read -r ANS || true
   if [ "${ANS:-}" = "y" ] || [ "${ANS:-}" = "Y" ]; then
+    LAN_IP="$(wifi_ip || true)"
     printf "\n  ${BOLD}อ่านก่อนทำ:${OFF}\n"
     printf "   • ต้องเห็นหน้า 'Pair device with pairing code' พร้อมกันตอนพิมพ์\n"
-    printf "     → ใช้ split screen (กดปุ่มRecent → กดค้างที่ Termux → Split screen)\n"
-    printf "   • หน้า pair มีเลข ${BOLD}2 ชุด${OFF} ที่ต่างกัน:\n"
-    printf "       หมายเลขพอร์ต 5 หลัก  (ในหัวข้อ 'Wi-Fi pairing code' เช่น 37123)\n"
-    printf "       รหัส pair  6 หลัก     (บรรทัด 'Pairing code' เช่น 482913)\n"
-    printf "   • ถ้าหน้าต่าง pair ปิดไป ต้องกลับไปเปิดใหม่ (รหัสจะเปลี่ยนทุกครั้ง)\n\n"
+    printf "     → ใช้ split screen (กดปุ่ม Recent → กดค้างที่ Termux → Split screen)\n"
+    printf "   • หน้า pair แสดง ${BOLD}2 บรรทัด${OFF} ที่ต้องใช้:\n"
+    printf "       'รหัสการจับคู่ Wi-Fi'  → ตัวเลข ${BOLD}6 หลัก${OFF}  (เช่น 105022)\n"
+    printf "       'ที่อยู่ IP และพอร์ต'  → เช่น ${BOLD}192.168.1.156:32887${OFF}\n"
+    printf "   • ใช้ ${BOLD}IP จากในกล่องขาว${OFF} (ไม่ใช่ 127.0.0.1) ถ้าเครื่องแสดงมาแบบนั้น\n"
+    printf "   • ถ้าหน้าต่าง pair ปิดไป ต้องเปิดใหม่ (รหัสเปลี่ยนทุกครั้ง)\n\n"
+    if [ -n "$LAN_IP" ]; then
+      printf "  ${DIM}ตรวจพบ IP ของเครื่องนี้: %s${OFF}\n" "$LAN_IP"
+    fi
 
     attempt=1
     paired=0
     while [ "$attempt" -le 3 ] && [ "$paired" = 0 ]; do
       printf "  ${DIM}--- ครั้งที่ %s จาก 3 ---${OFF}\n" "$attempt"
-      ask "  พอร์ต pair (เช่น 37123): "
-      read -r PAIR_PORT || true
-      ask "  รหัส pair 6 หลัก (เช่น 482913): "
+      ask "  IP:พอร์ต จากในกล่องขาว (หรือพิมพ์แค่พอร์ต): "
+      read -r PAIR_ADDR || true
+      ask "  รหัสจับคู่ 6 หลัก: "
       read -r PAIR_CODE || true
 
-      if [ -z "${PAIR_PORT:-}" ] || [ -z "${PAIR_CODE:-}" ]; then
-        warn "ต้องใส่ทั้งพอร์ตและรหัส"
+      if [ -z "${PAIR_ADDR:-}" ] || [ -z "${PAIR_CODE:-}" ]; then
+        warn "ต้องใส่ทั้ง IP:พอร์ต และรหัส"
       else
-        set -- pair "127.0.0.1:${PAIR_PORT}" "${PAIR_CODE}"
-        if out=$(adb "$@" 2>&1); then
+        PAIR_TARGET="$(expand_hostport "$PAIR_ADDR" "$LAN_IP")"
+        if out=$(adb pair "$PAIR_TARGET" "$PAIR_CODE" 2>&1); then
           printf '%s\n' "$out" | sed 's/^/    /'
           paired=1
         else
           printf '%s\n' "$out" | sed 's/^/    /'
           warn "pair ไม่สำเร็จ"
-          printf "    ตรวจว่า: หน้าต่าง pair ยังเปิดอยู่ / รหัสเป็น 6 หลัก / พอร์ตตรงกับหน้าจอ\n"
-          printf "    ถ้ายังไม่หาย: ปิด-เปิด Wireless debugging ใหม่ แล้วขอรหัสใหม่\n"
+          printf "    ตรวจว่า: หน้าต่าง pair ยังเปิดอยู่ / รหัสเป็น 6 หลัก / IP:พอร์ตตรงกับในกล่องขาว\n"
+          printf "    ถ้ายังไม่หาย: กดยกเลิก แล้วเปิด 'จับคู่กับอุปกรณ์' ใหม่ เอารหัสใหม่\n"
         fi
       fi
       attempt=$((attempt + 1))
@@ -182,19 +205,20 @@ else
       warn "pair ไม่สำเร็จครบ 3 ครั้ง — ข้ามไปก่อน แล้วทำทีหลังได้"
     fi
 
-    ask "  พอร์ตจากหน้า 'Wireless debugging' (เช่น 5555): "
-    read -r CONN_PORT || true
-    if [ -n "${CONN_PORT:-}" ]; then
-      adb connect "127.0.0.1:${CONN_PORT}" || true
+    ask "  IP:พอร์ต จากหน้า Wireless debugging (หรือพิมพ์แค่พอร์ต): "
+    read -r CONN_ADDR || true
+    if [ -n "${CONN_ADDR:-}" ]; then
+      CONN_TARGET="$(expand_hostport "$CONN_ADDR" "$LAN_IP")"
+      adb connect "$CONN_TARGET" || true
       sleep 1
       adb devices
       if ! adb devices 2>/dev/null | tail -n +2 | grep -q "device$"; then
         printf "\n  ${YELLOW}ยังไม่เห็น device${OFF} — ลอง:\n"
-        printf "    adb kill-server && adb connect 127.0.0.1:%s\n" "$CONN_PORT"
+        printf "    adb kill-server && adb connect %s\n" "$CONN_TARGET"
       fi
     fi
   else
-    warn "ข้ามไปก่อน — เชื่อมต่อทีหลังได้ด้วยคำสั่ง: adb pair 127.0.0.1:พอร์ต"
+    warn "ข้ามไปก่อน — เชื่อมต่อทีหลังได้ด้วยคำสั่ง: adb pair <IP>:<พอร์ต> <รหัส>"
   fi
 fi
 

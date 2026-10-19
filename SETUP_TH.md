@@ -58,8 +58,11 @@ adb version          # ควรได้ Android Debug Bridge version ...
 
 | ตัวเลข | หน้าตา | ใช้ทำอะไร |
 |---|---|---|
-| **พอร์ต pair** | 5 หลัก เช่น `37123` | ต่อท้าย `adb pair 127.0.0.1:` |
-| **รหัส pair** | 6 หลัก เช่น `482913` | ใส่ตอน adb ถาม หรือต่อท้ายคำสั่ง |
+| **IP:พอร์ต (ในกล่องขาว)** | เช่น `192.168.1.156:32887` | ตัวกลางของ `adb pair` |
+| **รหัสจับคู่** | 6 หลัก เช่น `105022` | ตัวสุดท้ายของ `adb pair` |
+
+> 📌 **ห้ามใช้ `127.0.0.1` ถ้าหน้าจอแสดง IP จริง** (เช่น OPPO / Xiaomi / Samsung บางรุ่น
+> จะขึ้น `192.168.x.x` ในกล่องคู่) ให้ใช้ IP ที่เห็นบนจอตรง ๆ
 
 > ⚠️ **รหัส pair ไม่ใช่เลขเดียวกับพอร์ต** — ถ้าใส่พอร์ตซ้ำลงไปจะขึ้น
 > `error: protocol fault (couldn't read status message)`
@@ -78,16 +81,16 @@ adb version          # ควรได้ Android Debug Bridge version ...
 
 ```bash
 # ใส่รหัสเป็นพารามิเตอร์ตัวที่ 2 (ไม่ต้องตอบคำถาม interactive)
-adb pair 127.0.0.1:37123 482913
+adb pair 192.168.1.156:32887 105022
 ```
 
-ถ้าสำเร็จจะขึ้น `Successfully paired to 127.0.0.1:37123`
+ถ้าสำเร็จจะขึ้น `Successfully paired to 192.168.1.156:32887`
 
 จากนั้นกลับไปหน้า **Wireless debugging** ดูบรรทัด **IP address & Port**
-(เช่น `127.0.0.1:5555`) แล้วรัน:
+(เช่น `192.168.1.156:37223` — พอร์ตนี้ **คนละตัว** กับตอน pair) แล้วรัน:
 
 ```bash
-adb connect 127.0.0.1:5555     # เปลี่ยน 5555 ตามที่หน้า Wireless debugging บอก
+adb connect 192.168.1.156:37223     # ใช้ค่าที่เห็นบนจอ
 adb devices
 ```
 
@@ -95,17 +98,18 @@ adb devices
 
 ```
 List of devices attached
-127.0.0.1:5555	device
+192.168.1.156:37223	device
 ```
 
 ### ถ้ายังไม่สำเร็จ
 
 | อาการ | วิธีแก้ |
 |---|---|
-| `protocol fault (couldn't read status message)` | ใส่รหัส 5 หลักจากพอร์ต → ต้องเป็น **6 หลัก** |
+| `protocol fault (couldn't read status message)` | ใส่พอร์ตซ้ำในช่องรหัส → รหัสต้องเป็น **6 หลัก** |
 | `Failed: Wrong password` | รหัสเก่า/หน้าต่างปิดแล้ว → เปิด pair ใหม่ เอารหัสใหม่ |
-| `failed to connect` | ใช้พอร์ต pair แทนพอร์ต connect → ดูบรรทัด `IP address & Port` |
-| ขึ้น `offline` | `adb kill-server && adb connect 127.0.0.1:5555` |
+| `unable to connect` ทุกครั้ง | ใช้ `127.0.0.1` แต่เครื่องต้องการ IP จริง | ใช้ IP จากในกล่องขาว |
+| `failed to connect` | ใช้พอร์ต pair แทนพอร์ต connect → ดูบรรทัดใหม่ในหน้า Wireless debugging |
+| ขึ้น `offline` | `adb kill-server && adb connect <IP>:<พอร์ต>` |
 | หน้าต่าง pair ปิดเอง | ใช้ split screen (ด้านบน) |
 
 > 💡 พอร์ตทั้งสองตัวเปลี่ยนทุกครั้งที่รีบูตหรือเปิด-ปิด Wireless debugging
@@ -181,7 +185,7 @@ python -m android_agent --check
 
 ```
 === ตรวจความพร้อม ===
-  ✓ อุปกรณ์ 127.0.0.1:5555 [device]
+  ✓ อุปกรณ์ 192.168.1.156:37223 [device]
   ✓ API key: gemini (39 ตัวอักษร)
   ℹ โมเดล: gemini-2.5-flash
   ℹ ระดับยืนยัน: risky
@@ -316,7 +320,7 @@ chmod 600 .env        # ไฟล์คีย์อ่านได้แค่�
 |---|---|---|
 | `ไม่พบคำสั่ง adb` | ยังไม่ลง android-tools | `pkg install android-tools -y` |
 | `ไม่พบมือถือที่เชื่อมต่อ` | หลุดหลังรีบูต/พักเครื่อง | ทำข้อ 4 ใหม่ (`adb pair` + `adb connect`) |
-| `device offline` | adb server ค้าง | `adb kill-server && adb connect 127.0.0.1:5555` |
+| `device offline` | adb server ค้าง | `adb kill-server && adb connect <IP>:<พอร์ต>` |
 | ภาพหน้าจอดำ | แอปบล็อก screencap (ธนาคาร/DRM) | ใช้กับแอปนั้นไม่ได้ เปลี่ยนแอป |
 | พิมพ์ไทยไม่ได้ | ยังไม่ตั้ง ADBKeyboard | ข้อ 5 |
 | `API ตอบ 429` | ชนโควตาฟรี | รอ 1 นาที หรือเปลี่ยนไปใช้ Groq (`AGENT_PROVIDER=groq`) |
