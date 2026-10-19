@@ -222,13 +222,15 @@ def scan_open_ports(
     ip: str,
     start: int = 30000,
     end: int = 50000,
-    workers: int = 400,
-    timeout: float = 0.25,
+    workers: int = 512,
+    timeout: float = 0.2,
 ) -> list[int]:
     """Return ports on `ip` that accept a TCP connection.
 
     Used when the pairing service is not advertised over mDNS: while the
-    pairing dialog is open, adbd listens on a fresh high port.
+    pairing dialog is open, adbd listens on a fresh high port. The scan has
+    to finish well inside the pairing code's lifetime, hence the wide
+    thread pool and short timeout (closed ports answer with RST at once).
     """
     import concurrent.futures
 
@@ -246,7 +248,7 @@ def scan_open_ports(
 
     open_ports: list[int] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        for result in pool.map(probe, range(start, end + 1), chunksize=128):
+        for result in pool.map(probe, range(start, end + 1), chunksize=64):
             if result is not None:
                 open_ports.append(result)
     return sorted(open_ports)
