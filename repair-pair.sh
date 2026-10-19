@@ -95,7 +95,15 @@ fi
 q "ADB_VENDOR_KEYS จะไม่ถูกใช้ — ใช้คีย์ใหม่ล้วน"
 
 # ---------------------------------------------------------------------------
-IP="${1:-}"
+PAIR_PORT_ARG=""
+IP=""
+for arg in "$@"; do
+  case "$arg" in
+    --port=*) PAIR_PORT_ARG="${arg#*=}" ;;
+    [0-9]*)  PAIR_PORT_ARG="$arg" ;;
+    *)       [ -z "$IP" ] && IP="$arg" ;;
+  esac
+done
 [ -z "$IP" ] && IP=$(detect_ip || true)
 
 say "2) รับรหัส (ไม่ต้องพิมพ์พอร์ต)"
@@ -131,11 +139,31 @@ ok "รหัส: ${BOLD}${PAIR_CODE}${OFF}"
 
 say "3) หาพอร์ต pair แล้วจับคู่"
 
-PAIR_PORT=""
+if [ -z "$IP" ]; then
+  IP=$(detect_ip || true)
+fi
+if [ -z "$IP" ]; then
+  bad "หา IP ของเครื่องไม่ได้ — ต่อ Wi-Fi ก่อน"
+  printf "  หรือพิมพ์ IP เอง (เช่น 192.168.1.156): "
+  read -r IP || true
+fi
+[ -z "$IP" ] && { bad "ไม่รู้ IP"; exit 1; }
+
+PAIR_PORT="${PAIR_PORT_ARG:-}"
 PAIRED=0
 
+if [ -n "$PAIR_PORT" ]; then
+  ok "ใช้พอร์ต pair ที่ระบุ: ${BOLD}${PAIR_PORT}${OFF} (ข้ามการสแกน)"
+  printf "  adb pair %s:%s ... " "$IP" "$PAIR_PORT"
+  OUT=$(timeout 40 adb pair "${IP}:${PAIR_PORT}" "$PAIR_CODE" 2>&1 || true)
+  case "$OUT" in
+    *Successfully\ paired*|*"protocol fault"*Success*) printf "${GREEN}✓${OFF}\n"; PAIRED=1 ;;
+    *) printf "${DIM}%s${OFF}\n" "$(printf '%s' "$OUT" | head -1)" ;;
+  esac
+fi
+
 # --- 3.1 mDNS ---
-if [ -f "${SCRIPT_DIR}/find_port.py" ]; then
+if [ "$PAIRED" = 0 ] && [ -f "${SCRIPT_DIR}/find_port.py" ]; then
   printf "  ลอง mDNS ... "
   PAIR_LINE=$(timeout 25 python "${SCRIPT_DIR}/find_port.py" --pair 2>/dev/null \
     | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$' | head -1 || true)
@@ -150,7 +178,9 @@ fi
 
 # --- 3.2 ถ้า mDNS ไม่เจอ ให้สแกน ---
 CANDIDATES=""
-if [ -n "$PAIR_PORT" ]; then
+if [ "$PAIRED" = 1 ]; then
+  :
+elif [ -n "$PAIR_PORT" ]; then
   CANDIDATES="$PAIR_PORT"
 elif [ -f "${SCRIPT_DIR}/find_port.py" ]; then
   warn "mDNS ไม่ประกาศพอร์ต pair — จะสแกนหาพอร์ตที่เปิดอยู่แทน"
@@ -284,7 +314,7 @@ if [ "$CONNECTED" = 1 ]; then
 fi
 
 DELAYED=0
-for p in $PORTS; do
+for p in ${CONNECT_PORTS:-}; do
   printf "  ลองซ้ำอีกรอบใน 3 วินาที: %s\n" "$p"
   sleep 3
   timeout 20 adb connect "${IP}:${p}" >/dev/null 2>&1 || true
