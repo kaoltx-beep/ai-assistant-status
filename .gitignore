@@ -1,0 +1,24 @@
+# ความลับ — ห้ามขึ้น git
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ไฟล์ที่เอเจนต์สร้างตอนรัน
+screenshot.png
+*.log
+last_result.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# OS
+.DS_Store
+Thumbs.db
