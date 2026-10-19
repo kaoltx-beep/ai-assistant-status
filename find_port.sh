@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# find_port.sh — หาพอร์ต ADB ไร้สายโดยไม่ต้องพึ่ง mDNS
+# find_port.sh — หาพอร์ต ADB ไร้สายของมือถือ แล้วเชื่อมต่อให้
 #
-# adb ใน Termux บางเวอร์ชันไม่รองรับ `adb mdns services`
-# สคริปต์นี้จะสแกนพอร์ตที่เปิดอยู่บนมือถือแล้วลองเชื่อมทีละตัว
+# ใช้เมื่อ `adb connect` ไม่ติด / ไม่รู้ว่าพอร์ตปัจจุบันคืออะไร
+# ไม่พึ่ง mDNS (adb ใน Termux หลายเวอร์ชันไม่รองรับ)
 #
 # วิธีใช้:
-#   bash find_port.sh                 # ใช้ IP ที่ตรวจพบอัตโนมัติ
-#   bash find_port.sh 192.168.1.156   # ระบุ IP เอง
+#   bash find_port.sh
+#   bash find_port.sh 192.168.1.156
+#
+# ตัวแปรปรับได้:
+#   ADB_PORT_START / ADB_PORT_END   ช่วงพอร์ตที่จะสแกน (ค่าเริ่มต้น 30000-65535)
 set -uo pipefail
 
 BOLD=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'; GREEN=$'\033[32m'
@@ -17,29 +20,79 @@ warn() { printf "  ${YELLOW}!${OFF} %s\n" "$*"; }
 bad()  { printf "  ${RED}✗${OFF} %s\n" "$*"; }
 say()  { printf "\n${BOLD}${CYAN}%s${OFF}\n" "$*"; }
 
-command -v adb >/dev/null 2>&1 || { bad "ไม่พบ adb"; exit 1; }
+command -v adb >/dev/null 2>&1 || { bad "ไม่พบ adb — pkg install android-tools"; exit 1; }
 
-# Best-effort LAN IP of this phone, without external tools.
+# ---------------------------------------------------------------------------
+# IP ของเครื่องนี้ — ลองจากแหล่งที่เชื่อถือได้ก่อน
+# ---------------------------------------------------------------------------
 detect_ip() {
   local candidate=""
-  candidate=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')
+  candidate=$(ip route get 1.1.1.1 2>/dev/null \
+    | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')
   [ -n "$candidate" ] && { printf '%s' "$candidate"; return 0; }
 
-  candidate=$(ip -4 addr show 2>/dev/null | awk '/inet /{sub("/.*","",$2); if ($2 !~ /^127\./) {print $2; exit}}')
+  candidate=$(ip -4 addr show 2>/dev/null \
+    | awk '/inet /{sub("/.*","",$2); if ($2 !~ /^127\./) {print $2; exit}}')
   [ -n "$candidate" ] && { printf '%s' "$candidate"; return 0; }
 
-  candidate=$(ifconfig 2>/dev/null | awk '/inet /{sub("addr:","",$2); if ($2 !~ /^127\./) {print $2; exit}}')
+  candidate=$(ifconfig 2>/dev/null \
+    | awk '/inet /{sub("addr:","",$2); if ($2 !~ /^127\./) {print $2; exit}}')
   [ -n "$candidate" ] && { printf '%s' "$candidate"; return 0; }
 
   return 1
 }
 
+# ---------------------------------------------------------------------------
+# พอร์ตที่กำลัง listen อยู่ — อ่านจาก /proc เร็วกว่าสแกนมาก
+# (บางเครื่อง SELinux ปิดไว้ จะอ่านไม่เห็นพอร์ตของ adbd ก็ไม่เป็นไร)
+# ---------------------------------------------------------------------------
+ports_from_proc() {
+  local start="${1:-30000}" end="${2:-65535}"
+  for f in /proc/net/tcp /proc/net/tcp6; do
+    [ -r "$f" ] || continue
+    awk 'NR>1 && $4=="0A" {split($2,a,":"); print a[2]}' "$f" 2>/dev/null
+  done | while read -r hex; do
+    [ -n "$hex" ] || continue
+    port=$(printf '%d' "$((16#$hex))" 2>/dev/null) || continue
+    [ "$port" -ge "$start" ] && [ "$port" -le "$end" ] && printf '%s\n' "$port"
+  done | sort -n -u
+}
+
+# ---------------------------------------------------------------------------
+# สแกนด้วย bash /dev/tcp (ไม่ต้องใช้ nc/root)
+# ---------------------------------------------------------------------------
+scan_ports() {
+  local ip="$1" start="$2" end="$3"
+  seq "$start" "$end" | xargs -P 400 -I{} \
+    bash -c 'timeout 0.3 bash -c "exec 3<>/dev/tcp/'"$ip"'/{}" 2>/dev/null && echo {}' \
+    2>/dev/null | sort -n -u
+}
+
+run_connections() {
+  local ip="$1"; shift
+  local found=0
+  for port in "$@"; do
+    [ -n "$port" ] || continue
+    for host in "$ip" 127.0.0.1; do
+      target="${host}:${port}"
+      printf "  %-24s " "$target"
+      out=$(adb connect "$target" 2>&1)
+      case "$out" in
+        *connected*|*"already connected"*) printf "${GREEN}✓ %s${OFF}\n" "$out"; found=1 ;;
+        *)                                 printf "${DIM}%s${OFF}\n" "$out" ;;
+      esac
+    done
+  done
+  return $((1 - found))
+}
+
+# ---------------------------------------------------------------------------
 IP="${1:-}"
 if [ -z "$IP" ]; then
   IP=$(detect_ip || true)
 fi
 if [ -z "$IP" ]; then
-  printf "  ใส่ IP ของมือถือ (เช่น 192.168.1.156): "
+  printf "  ใส่ IP ของมือถือ (ดูจากหน้า Wireless debugging เช่น 192.168.1.156): "
   read -r IP || true
 fi
 [ -z "$IP" ] && { bad "ไม่รู้ IP"; exit 1; }
@@ -47,52 +100,60 @@ fi
 PORT_START="${ADB_PORT_START:-30000}"
 PORT_END="${ADB_PORT_END:-65535}"
 
-say "สแกนพอร์ตบน ${IP}"
-printf "  ${DIM}ช่วง %s-%s — ใช้เวลาราว 1-2 นาทีบนมือถือ${OFF}\n" "$PORT_START" "$PORT_END"
+say "หาเครื่องที่ ${IP}"
 
-# /dev/tcp is a bash builtin: no netcat needed.
-scan_one() {
-  local host="$1" port="$2"
-  (exec 3<>"/dev/tcp/${host}/${port}") >/dev/null 2>&1 && echo "$port"
-  exec 3>&- 2>/dev/null || true
-}
-export -f scan_one 2>/dev/null || true
-
-OPEN=""
-if command -v timeout >/dev/null 2>&1; then
-  OPEN=$(
-    seq "$PORT_START" "$PORT_END" \
-      | xargs -P 500 -I{} bash -c 'timeout 0.35 bash -c "exec 3<>/dev/tcp/'"$IP"'/{}" 2>/dev/null && echo {}' 2>/dev/null \
-      | sort -n -u
-  )
-else
-  for port in $(seq "$PORT_START" "$PORT_END"); do
-    (exec 3<>"/dev/tcp/${IP}/${port}") >/dev/null 2>&1 && echo "$port"
-    exec 3>&- 2>/dev/null || true
-  done | sort -n -u
+# ---- 1) มีการเชื่อมต่ออยู่แล้วหรือเปล่า -------------------------------------
+if adb devices 2>/dev/null | tail -n +2 | grep -qE '[[:space:]]device$'; then
+  ok "เชื่อมต่ออยู่แล้ว:"
+  adb devices | tail -n +2 | sed 's/^/    /'
+  exit 0
 fi
 
+# ---- 2) อ่านพอร์ตจาก /proc ------------------------------------------------
+say "1) ตรวจพอร์ตที่เปิดอยู่บนเครื่อง"
+PROC_PORTS=$(ports_from_proc "$PORT_START" "$PORT_END" || true)
+if [ -n "$PROC_PORTS" ]; then
+  printf "  เจอ: %s\n" "$(printf '%s' "$PROC_PORTS" | tr '\n' ' ')"
+  if run_connections "$IP" $PROC_PORTS; then
+    say "ผลลัพธ์"; adb devices | tail -n +2 | sed 's/^/  /'
+    ok "เชื่อมต่อสำเร็จ"
+    exit 0
+  fi
+  warn "พอร์ตที่เห็นยังไม่ใช่ของ adb (ปกติบน Android — SELinux ซ่อนไว้)"
+else
+  warn "อ่าน /proc ไม่ได้ (ปกติบน Android) — จะสแกนแทน"
+fi
+
+# ---- 3) สแกน --------------------------------------------------------------
+say "2) สแกนพอร์ต ${PORT_START}-${PORT_END}"
+printf "  ${DIM}ใช้เวลาราว 1-3 นาที ปล่อยให้ทำงาน${OFF}\n"
+
+OPEN=$(scan_ports "$IP" "$PORT_START" "$PORT_END" || true)
+
 if [ -z "$OPEN" ]; then
-  warn "ไม่พบพอร์ตที่เปิดอยู่"
-  printf "\n  ตรวจว่า:\n"
-  printf "    • Wireless debugging เปิดอยู่ (สวิตช์สีฟ้า)\n"
-  printf "    • มือถือต่อ Wi-Fi เดียวกับที่แจ้ง IP: %s\n" "$IP"
-  printf "    • ลองปิด-เปิด Wireless debugging ใหม่\n"
+  bad "ไม่พบพอร์ตที่เปิดอยู่เลย"
+  cat <<EOF
+
+  แปลว่าเครื่องนี้มองไม่เห็น ${IP} เลย — ตรวจ 3 ข้อนี้:
+
+  1. Wi-Fi เปิดอยู่ไหม (ต้องต่อ Wi-Fi จริง ไม่ใช่ 4G)
+     ดูบรรทัด 'ที่อยู่ IP และพอร์ต' ในหน้า Wireless debugging
+     ถ้าไม่มี IP ขึ้น แปลว่ายังไม่ต่อ Wi-Fi
+
+  2. Wireless debugging สวิตช์สีฟ้าเปิดอยู่ไหม
+
+  3. IP ที่ใช้ตรงกับที่หน้าจอแสดงไหม (อาจเปลี่ยนวง เช่น 192.168.1.x → 10.0.0.x)
+
+  ถ้า 3 ข้อผ่านหมด ให้ปิด-เปิด Wireless debugging ใหม่ แล้วรันสคริปต์นี้อีกครั้ง
+
+EOF
   exit 1
 fi
 
 printf "  เจอพอร์ต: %s\n" "$(printf '%s' "$OPEN" | tr '\n' ' ')"
 
-say "ลองเชื่อมต่อ"
-for port in $OPEN; do
-  target="${IP}:${port}"
-  printf "  %s ... " "$target"
-  out=$(adb connect "$target" 2>&1)
-  case "$out" in
-    *connected*) printf "${GREEN}✓${OFF}\n" ;;
-    *)           printf "${DIM}%s${OFF}\n" "$out" ;;
-  esac
-done
+say "3) ลองเชื่อมต่อ"
+run_connections "$IP" $OPEN || true
 
 say "ผลลัพธ์"
 adb devices | tail -n +2 | sed 's/^/  /'
@@ -104,7 +165,9 @@ if adb devices 2>/dev/null | tail -n +2 | grep -qE '[[:space:]]device$'; then
 fi
 
 bad "ยังเชื่อมไม่ได้"
-printf "\n  ถ้าเห็น 'unauthorized' → ดูหน้าจอมือถือ กด Allow\n"
-printf "  ถ้าไม่เห็นอะไรเลย → เปิดหน้า Wireless debugging อ่าน 'IP address & Port'\n"
-printf "  แล้วรัน: ${BOLD}adb connect <IP>:<พอร์ต>${OFF}\n"
+cat <<'EOF'
+
+  ถ้าเห็น 'unauthorized' → ดูหน้าจอมือถือ กด Allow
+  ถ้าไม่เห็นอุปกรณ์เลย → เปิด-ปิด Wireless debugging ใหม่ แล้วรันซ้ำ
+EOF
 exit 1
