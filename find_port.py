@@ -20,7 +20,9 @@ import subprocess
 import sys
 import time
 
-SERVICE = "_adb-tls-connect._tcp.local"
+SERVICE_CONNECT = "_adb-tls-connect._tcp.local"
+SERVICE_PAIR = "_adb-tls-pairing._tcp.local"
+SERVICE = SERVICE_CONNECT  # back-compat for tests/importers
 MDNS_ADDR = "224.0.0.251"
 MDNS_PORT = 5353
 
@@ -148,14 +150,18 @@ def local_ips() -> list[str]:
     return ips
 
 
-def query_once(targets: list[str], timeout: float = 2.5) -> list[tuple[str, int]]:
-    """Ask mDNS for _adb-tls-connect._tcp; return [(ip, port), ...]."""
+def query_once(
+    targets: list[str],
+    timeout: float = 2.5,
+    service: str = SERVICE_CONNECT,
+) -> list[tuple[str, int]]:
+    """Ask mDNS for one ADB service; return [(ip, port), ...]."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     try:
         sock.bind(("0.0.0.0", 0))
         sock.settimeout(timeout)
-        packet = build_query(SERVICE, TYPE_PTR)
+        packet = build_query(service, TYPE_PTR)
         for target in targets:
             try:
                 sock.sendto(packet, (target, MDNS_PORT))
@@ -179,7 +185,7 @@ def query_once(targets: list[str], timeout: float = 2.5) -> list[tuple[str, int]
 
             for _name, instance in info["ptr"]:
                 inst = instance.rstrip(".")
-                if SERVICE.rstrip(".") not in inst:
+                if service.rstrip(".") not in inst:
                     continue
                 srv = srv_by_name.get(inst)
                 if not srv:
@@ -197,17 +203,17 @@ def query_once(targets: list[str], timeout: float = 2.5) -> list[tuple[str, int]
         sock.close()
 
 
-def discover() -> list[tuple[str, int]]:
+def discover(service: str = SERVICE_CONNECT, attempts: int = 3) -> list[tuple[str, int]]:
     targets = [MDNS_ADDR, "127.0.0.1", *local_ips()]
     # de-dupe while keeping order
     seen: set[str] = set()
     ordered = [t for t in targets if not (t in seen or seen.add(t))]
 
-    for attempt in range(3):
-        found = query_once(ordered, timeout=2.5)
+    for attempt in range(attempts):
+        found = query_once(ordered, timeout=2.5, service=service)
         if found:
             return found
-        if attempt < 2:
+        if attempt < attempts - 1:
             time.sleep(1)
     return []
 
@@ -261,12 +267,31 @@ def try_connect(hosts: list[str], port: int) -> tuple[bool, str]:
     return False, last
 
 
+def fmt_pairs(pairs: list[tuple[str, int]]) -> str:
+    return "\n".join(f"{ip}:{port}" for ip, port in pairs)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="หา ADB wireless port ผ่าน mDNS")
     parser.add_argument("--connect", action="store_true", help="สั่ง adb connect ให้เลย")
+    parser.add_argument(
+        "--pair",
+        action="store_true",
+        help="หาพอร์ตสำหรับ adb pair (ใช้ตอนเปิดกล่อง 'จับคู่กับอุปกรณ์')",
+    )
     parser.add_argument("--ip", default="", help="ระบุ IP เอง (ปกติตรวจอัตโนมัติ)")
     parser.add_argument("--timeout", type=float, default=2.5)
     args = parser.parse_args(argv)
+
+    if args.pair:
+        # The pairing service only exists while the pairing dialog is open.
+        print("กำลังค้นหาพอร์ต pair ผ่าน mDNS ...", flush=True)
+        pairs = discover(SERVICE_PAIR, attempts=2)
+        if not pairs:
+            print("ไม่พบพอร์ต pair (กล่องจับคู่อาจปิดอยู่)", file=sys.stderr)
+            return 1
+        print(fmt_pairs(pairs))
+        return 0
 
     print("กำลังค้นหาผ่าน mDNS ...", flush=True)
     pairs = discover()
@@ -275,8 +300,7 @@ def main(argv: list[str] | None = None) -> int:
         print("ไม่พบ (mDNS อาจถูกบล็อก/ไม่ทำงานบนเครื่องนี้)", file=sys.stderr)
         return 1
 
-    for ip, port in pairs:
-        print(f"{ip}:{port}")
+    print(fmt_pairs(pairs))
 
     if not args.connect:
         return 0

@@ -27,6 +27,18 @@ def make_response(port: int = 41999, ip: bytes = bytes([192, 168, 1, 200])) -> b
     )
 
 
+class PairingServiceTests(unittest.TestCase):
+    def test_pair_service_name_differs_from_connect(self):
+        self.assertEqual(fp.SERVICE_CONNECT, "_adb-tls-connect._tcp.local")
+        self.assertEqual(fp.SERVICE_PAIR, "_adb-tls-pairing._tcp.local")
+        self.assertNotEqual(fp.SERVICE_CONNECT, fp.SERVICE_PAIR)
+
+    def test_query_targets_pairing_service(self):
+        packet = fp.build_query(fp.SERVICE_PAIR, fp.TYPE_PTR)
+        self.assertIn(b"_adb-tls-pairing", packet)
+        self.assertNotIn(b"_adb-tls-connect", packet)
+
+
 class QueryBuildingTests(unittest.TestCase):
     def test_query_has_qu_bit_set(self):
         packet = fp.build_query(SERVICE, fp.TYPE_PTR)

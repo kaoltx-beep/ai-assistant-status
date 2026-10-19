@@ -98,37 +98,76 @@ q "ADB_VENDOR_KEYS จะไม่ถูกใช้ — ใช้คีย์�
 IP="${1:-}"
 [ -z "$IP" ] && IP=$(detect_ip || true)
 
-say "2) กรอกข้อมูลจากกล่องจับคู่"
-q "ใช้ split screen: ครึ่งบน = กล่อง 'จับคู่กับอุปกรณ์' / ครึ่งล่าง = Termux"
+say "2) หาพอร์ต pair และรับรหัส"
 q "เปิด Settings → Developer options → Wireless debugging → 'จับคู่กับอุปกรณ์ด้วยรหัส'"
+q "ปล่อยกล่องนั้นค้างไว้ (ใช้ split screen) — สคริปต์จะหาพอร์ตให้เอง"
 
-if [ -z "$IP" ]; then
-  printf "  IP ของมือถือ: "
-  read -r IP || true
+PAIR_TARGET=""
+if [ -f "${SCRIPT_DIR}/find_port.py" ]; then
+  printf "  กำลังหาพอร์ต pair ผ่าน mDNS ... "
+  PAIR_LINE=$(timeout 25 python "${SCRIPT_DIR}/find_port.py" --pair 2>/dev/null \
+    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$' | head -1 || true)
+  if [ -n "$PAIR_LINE" ]; then
+    printf "${GREEN}เจอ${OFF}\n"
+    ok "พอร์ต pair: ${BOLD}${PAIR_LINE}${OFF}  (ไม่ต้องพิมพ์เอง)"
+    PAIR_TARGET="$PAIR_LINE"
+    IP="${PAIR_LINE%%:*}"
+  else
+    printf "${YELLOW}ไม่เจอ${OFF}\n"
+  fi
 fi
-[ -z "$IP" ] && { bad "ไม่รู้ IP"; exit 1; }
-ok "IP: ${BOLD}${IP}${OFF}"
 
-printf "  IP:พอร์ต ในกล่องขาว (เช่น %s:32887): " "$IP"
-read -r PAIR_IN || true
-[ -z "$PAIR_IN" ] && { bad "ไม่ได้กรอก"; exit 1; }
+if [ -z "$PAIR_TARGET" ]; then
+  warn "mDNS ไม่ประกาศพอร์ต pair — ต้องพิมพ์เอง"
+  q "ในกล่องขาว มี 2 บรรทัด:"
+  q "   'รหัสการจับคู่ Wi-Fi'   → 6 หลัก  (เช่น 105022)"
+  q "   'ที่อยู่ IP และพอร์ต'    → เช่น 192.168.1.156:32887"
+  q "ช่องต่อไปนี้ต้องการ ${BOLD}ที่อยู่ IP และพอร์ต${OFF} ไม่ใช่รหัส"
+  printf "  IP:พอร์ต ในกล่องขาว: "
+  read -r PAIR_IN || true
+  [ -z "$PAIR_IN" ] && { bad "ไม่ได้กรอก"; exit 1; }
+  case "$PAIR_IN" in
+    *:*) : ;;
+    *) PAIR_IN="${IP}:${PAIR_IN}" ;;
+  esac
+  PAIR_TARGET="$PAIR_IN"
+fi
 
-case "$PAIR_IN" in
-  *:*) : ;;
-  *) PAIR_IN="${IP}:${PAIR_IN}" ;;
+# --- ตรวจพอร์ต ---
+PAIR_PORT="${PAIR_TARGET##*:}"
+case "$PAIR_PORT" in
+  ""|*[!0-9]*)
+    bad "พอร์ต '${PAIR_PORT}' ไม่ใช่ตัวเลข"
+    q "ดูบรรทัด 'ที่อยู่ IP และพอร์ต' ในกล่องขาวอีกครั้ง"
+    exit 1 ;;
 esac
+if [ "$PAIR_PORT" -gt 65535 ] || [ "$PAIR_PORT" -lt 1 ]; then
+  bad "พอร์ต ${PAIR_PORT} ไม่ถูกต้อง (ต้อง 1-65535)"
+  q "คุณอาจกรอกรหัส 6 หลักลงในช่องพอร์ต"
+  q "พอร์ตคือเลข ${BOLD}5 หลัก${OFF} บรรทัด 'ที่อยู่ IP และพอร์ต' (เช่น 32887)"
+  q "รหัสคือเลข ${BOLD}6 หลัก${OFF} บรรทัด 'รหัสการจับคู่ Wi-Fi' (เช่น 105022)"
+  exit 1
+fi
+[ -z "$IP" ] && IP="${PAIR_TARGET%%:*}"
 
-printf "  รหัส 6 หลัก: "
+printf "  รหัส 6 หลัก (บรรทัด 'รหัสการจับคู่ Wi-Fi'): "
 read -r PAIR_CODE || true
 case "$PAIR_CODE" in
-  ""|*[!0-9]*) bad "รหัสต้องเป็นตัวเลข"; exit 1 ;;
+  ""|*[!0-9]*) bad "รหัสต้องเป็นตัวเลขล้วน"; exit 1 ;;
 esac
-[ "${#PAIR_CODE}" -ne 6 ] && warn "รหัส ${#PAIR_CODE} หลัก (ปกติ 6) — อาจกรอกผิด"
+if [ "${#PAIR_CODE}" -ne 6 ]; then
+  bad "รหัสต้อง 6 หลัก (ที่กรอกมา ${#PAIR_CODE} หลัก)"
+  q "ถ้าคุณกรอกพอร์ตมา แปลว่าสลับช่อง — รหัสอยู่ในบรรทัด 'รหัสการจับคู่ Wi-Fi'"
+  exit 1
+fi
+if [ "$PAIR_CODE" = "$PAIR_PORT" ]; then
+  bad "รหัสกับพอร์ตเป็นเลขเดียวกัน — น่าจะสลับช่อง"
+  exit 1
+fi
 
-# ---------------------------------------------------------------------------
 say "3) Pair"
-printf "  adb pair %s %s\n" "$PAIR_IN" "$PAIR_CODE"
-PAIR_OUT=$(timeout 40 adb pair "$PAIR_IN" "$PAIR_CODE" 2>&1 || true)
+printf "  adb pair %s %s\n" "$PAIR_TARGET" "$PAIR_CODE"
+PAIR_OUT=$(timeout 40 adb pair "$PAIR_TARGET" "$PAIR_CODE" 2>&1 || true)
 printf '%s\n' "$PAIR_OUT" | sed 's/^/    /'
 
 PAIRED=0
