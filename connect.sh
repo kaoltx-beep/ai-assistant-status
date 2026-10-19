@@ -19,6 +19,21 @@ say()  { printf "\n${BOLD}${CYAN}%s${OFF}\n" "$*"; }
 
 command -v adb >/dev/null 2>&1 || { bad "ไม่พบ adb — pkg install android-tools"; exit 1; }
 
+# Best-effort LAN IP of this phone, without external tools.
+detect_ip() {
+  local candidate=""
+  candidate=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')
+  [ -n "$candidate" ] && { printf '%s' "$candidate"; return 0; }
+
+  candidate=$(ip -4 addr show 2>/dev/null | awk '/inet /{sub("/.*","",$2); if ($2 !~ /^127\./) {print $2; exit}}')
+  [ -n "$candidate" ] && { printf '%s' "$candidate"; return 0; }
+
+  candidate=$(ifconfig 2>/dev/null | awk '/inet /{sub("addr:","",$2); if ($2 !~ /^127\./) {print $2; exit}}')
+  [ -n "$candidate" ] && { printf '%s' "$candidate"; return 0; }
+
+  return 1
+}
+
 connected() {
   adb devices 2>/dev/null | tail -n +2 | grep -qE '[[:space:]]device$'
 }
@@ -62,30 +77,46 @@ if connected; then
 fi
 
 say "2) ค้นหามือถือผ่าน mDNS"
-targets=$(discover_connect_targets || true)
-
-if [ -z "$targets" ]; then
-  warn "ยังไม่เจอ (บางเครื่องไม่รองรับ mDNS)"
-else
-  printf "  เจอ: %s\n" "$(printf '%s' "$targets" | tr '\n' ' ')"
-fi
-
+mdns_out=$(adb mdns services 2>&1 || true)
 found=0
-for t in $targets; do
-  if try_connect "$t"; then found=1; fi
-done
 
-if [ "$found" = 0 ]; then
-  # mDNS may need a nudge: toggle nothing, just wait and retry once.
-  say "3) รอ 3 วินาที แล้วค้นหาอีกครั้ง"
-  sleep 3
-  for t in $(discover_connect_targets || true); do
-    if try_connect "$t"; then found=1; fi
-  done
+if printf '%s' "$mdns_out" | grep -qi "not supported"; then
+  warn "adb เวอร์ชันนี้ไม่รองรับ mDNS — จะสแกนพอร์ตแทน"
+else
+  targets=$(printf '%s\n' "$mdns_out" | awk '$2 == "_adb-tls-connect._tcp" {print $3}' | sort -u)
+  if [ -z "$targets" ]; then
+    warn "mDNS ไม่พบอุปกรณ์ — จะสแกนพอร์ตแทน"
+  else
+    printf "  เจอ: %s\n" "$(printf '%s' "$targets" | tr '\n' ' ')"
+    for t in $targets; do
+      if try_connect "$t"; then found=1; fi
+    done
+  fi
 fi
 
 if [ "$found" = 0 ]; then
-  say "4) ค้นหาอัตโนมัติไม่สำเร็จ — ขอให้ระบุเอง"
+  say "3) สแกนหาพอร์ตที่เปิดอยู่"
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "$PWD")"
+  IP_GUESS=$(detect_ip || true)
+  if [ -f "${SCRIPT_DIR}/find_port.sh" ]; then
+    if [ -n "${IP_GUESS:-}" ]; then
+      bash "${SCRIPT_DIR}/find_port.sh" "$IP_GUESS" || true
+    else
+      bash "${SCRIPT_DIR}/find_port.sh" || true
+    fi
+    if connected; then
+      ok "เชื่อมต่อสำเร็จ"
+      adb devices | tail -n +2 | sed 's/^/    /'
+      exit 0
+    fi
+  else
+    warn "ไม่พบ find_port.sh — ข้ามการสแกน"
+  fi
+  found=0
+fi
+
+if [ "$found" = 0 ]; then
+  say "4) ยังไม่สำเร็จ — ขอให้ระบุเอง"
   printf "  บนมือถือ: Settings → System → Developer options → Wireless debugging\n"
   printf "  ดูบรรทัด ${BOLD}'IP address & Port'${OFF} (เช่น 192.168.1.156:37223)\n\n"
   printf "  ใส่ IP:พอร์ต แล้ว Enter: "
