@@ -214,6 +214,7 @@ else
       adb devices
       if ! adb devices 2>/dev/null | tail -n +2 | grep -q "device$"; then
         printf "\n  ${YELLOW}ยังไม่เห็น device${OFF} — ลอง:\n"
+        printf "    bash connect.sh          ${DIM}(หา IP:พอร์ตใหม่อัตโนมัติ)${OFF}\n"
         printf "    adb kill-server && adb connect %s\n" "$CONN_TARGET"
       fi
     fi

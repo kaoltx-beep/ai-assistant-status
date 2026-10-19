@@ -101,6 +101,18 @@ List of devices attached
 192.168.1.156:37223	device
 ```
 
+### ถ้าต่อไม่ติด — ใช้ตัวช่วยอัตโนมัติ
+
+```bash
+bash connect.sh
+```
+
+สคริปต์นี้จะปิด-เปิด adb server, ค้นหาพอร์ตปัจจุบันผ่าน mDNS แล้วเชื่อมให้เอง
+ถ้าหาไม่เจอจะถาม IP:พอร์ต (ใส่แค่พอร์ตก็ได้)
+
+> 💡 **สาเหตุที่พบบ่อยสุด:** พอร์ตเชื่อมต่อเปลี่ยนทุกครั้งที่เปิด-ปิด Wireless debugging
+> รหัส pair ที่เคยใช้ได้จึงไม่เกี่ยวกับพอร์ตที่ต้อง connect
+
 ### ถ้ายังไม่สำเร็จ
 
 | อาการ | วิธีแก้ |
@@ -111,6 +123,8 @@ List of devices attached
 | `failed to connect` | ใช้พอร์ต pair แทนพอร์ต connect → ดูบรรทัดใหม่ในหน้า Wireless debugging |
 | ขึ้น `offline` | `adb kill-server && adb connect <IP>:<พอร์ต>` |
 | หน้าต่าง pair ปิดเอง | ใช้ split screen (ด้านบน) |
+| `protocol fault ... : Success` | **pair สำเร็จแล้ว** (บั๊กการพิมพ์ของ adb) → รัน `bash connect.sh` ต่อ |
+| `failed to connect` หลัง pair สำเร็จ | พอร์ตเก่า → ดู 'IP address & Port' ใหม่ หรือรัน `bash connect.sh` |
 
 > 💡 พอร์ตทั้งสองตัวเปลี่ยนทุกครั้งที่รีบูตหรือเปิด-ปิด Wireless debugging
 > ถ้าเจอ "ไม่พบอุปกรณ์" ให้กลับมาทำข้อ 4 ใหม่ (ใช้ไม่ถึง 1 นาที)

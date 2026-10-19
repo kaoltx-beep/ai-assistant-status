@@ -26,6 +26,7 @@ nano .env                     # ใส่ GEMINI_API_KEY
 adb pair 127.0.0.1:PORT       # ครั้งแรกเท่านั้น
 adb connect 127.0.0.1:PORT
 
+bash connect.sh              # ต่อ ADB อัตโนมัติ (หา IP:พอร์ตใหม่เอง)
 python -m android_agent --check
 python -m android_agent "เปิด Settings ดูเลข Android version"
 ```
