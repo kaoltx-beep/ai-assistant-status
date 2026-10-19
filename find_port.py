@@ -218,6 +218,40 @@ def discover(service: str = SERVICE_CONNECT, attempts: int = 3) -> list[tuple[st
     return []
 
 
+def scan_open_ports(
+    ip: str,
+    start: int = 30000,
+    end: int = 50000,
+    workers: int = 400,
+    timeout: float = 0.25,
+) -> list[int]:
+    """Return ports on `ip` that accept a TCP connection.
+
+    Used when the pairing service is not advertised over mDNS: while the
+    pairing dialog is open, adbd listens on a fresh high port.
+    """
+    import concurrent.futures
+
+    def probe(port: int) -> int | None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        try:
+            if sock.connect_ex((ip, port)) == 0:
+                return port
+        except OSError:
+            return None
+        finally:
+            sock.close()
+        return None
+
+    open_ports: list[int] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        for result in pool.map(probe, range(start, end + 1), chunksize=128):
+            if result is not None:
+                open_ports.append(result)
+    return sorted(open_ports)
+
+
 # ---------------------------------------------------------------------------
 def adb_devices() -> str:
     try:
@@ -280,8 +314,29 @@ def main(argv: list[str] | None = None) -> int:
         help="หาพอร์ตสำหรับ adb pair (ใช้ตอนเปิดกล่อง 'จับคู่กับอุปกรณ์')",
     )
     parser.add_argument("--ip", default="", help="ระบุ IP เอง (ปกติตรวจอัตโนมัติ)")
+    parser.add_argument(
+        "--scan-pair",
+        action="store_true",
+        help="สแกนหาพอร์ต pair (ใช้เมื่อ mDNS ไม่ประกาศ)",
+    )
+    parser.add_argument("--port-start", type=int, default=30000)
+    parser.add_argument("--port-end", type=int, default=50000)
+    parser.add_argument("--exclude", default="", help="พอร์ตที่ไม่ต้องลอง (เช่น พอร์ต connect)")
     parser.add_argument("--timeout", type=float, default=2.5)
     args = parser.parse_args(argv)
+
+    if args.scan_pair:
+        ip = args.ip or (local_ips() or ["127.0.0.1"])[0]
+        print(f"กำลังสแกนพอร์ต {args.port_start}-{args.port_end} บน {ip} ...", flush=True)
+        exclude = {int(x) for x in args.exclude.replace(",", " ").split() if x.isdigit()}
+        ports = [
+            p
+            for p in scan_open_ports(ip, args.port_start, args.port_end)
+            if p not in exclude
+        ]
+        for port in ports:
+            print(f"{ip}:{port}")
+        return 0 if ports else 1
 
     if args.pair:
         # The pairing service only exists while the pairing dialog is open.

@@ -98,108 +98,172 @@ q "ADB_VENDOR_KEYS จะไม่ถูกใช้ — ใช้คีย์�
 IP="${1:-}"
 [ -z "$IP" ] && IP=$(detect_ip || true)
 
-say "2) หาพอร์ต pair และรับรหัส"
+say "2) รับรหัส (ไม่ต้องพิมพ์พอร์ต)"
 q "เปิด Settings → Developer options → Wireless debugging → 'จับคู่กับอุปกรณ์ด้วยรหัส'"
-q "ปล่อยกล่องนั้นค้างไว้ (ใช้ split screen) — สคริปต์จะหาพอร์ตให้เอง"
+q "ปล่อยกล่องนั้นค้างไว้ — สคริปต์จะหาพอร์ตให้เองทั้งหมด"
+q "ในกล่องขาวมี 2 บรรทัด: 'รหัสการจับคู่ Wi-Fi' (6 หลัก) และ 'ที่อยู่ IP และพอร์ต'"
+q "สคริปต์ต้องการแค่ ${BOLD}รหัส 6 หลัก${OFF} เท่านั้น"
 
-PAIR_TARGET=""
+# พอร์ต connect ที่รู้อยู่แล้ว — ใช้ตัดออกจากผลสแกน
+KNOWN_CONNECT=""
 if [ -f "${SCRIPT_DIR}/find_port.py" ]; then
-  printf "  กำลังหาพอร์ต pair ผ่าน mDNS ... "
+  KNOWN_CONNECT=$(timeout 20 python "${SCRIPT_DIR}/find_port.py" 2>/dev/null \
+    | grep -E '^[0-9]+\.' | awk -F: '{print $NF}' | sort -n -u | tr '\n' ' ' || true)
+fi
+[ -n "$KNOWN_CONNECT" ] && q "พอร์ต connect ที่รู้อยู่แล้ว: $(printf '%s' "$KNOWN_CONNECT" | tr -s ' ')"
+
+printf "  รหัส 6 หลัก (บรรทัด 'รหัสการจับคู่ Wi-Fi'): "
+read -r PAIR_CODE || true
+
+# ผู้ใช้มักพิมพ์รหัสผิดช่อง — รับทุกอย่างแล้ว normalize
+case "$PAIR_CODE" in
+  *:*) PAIR_CODE="${PAIR_CODE##*:}" ;;   # เผื่อวางมาทั้ง IP:พอร์ต
+esac
+case "$PAIR_CODE" in
+  ""|*[!0-9]*) bad "รหัสต้องเป็นตัวเลขล้วน"; exit 1 ;;
+esac
+if [ "${#PAIR_CODE}" -ne 6 ]; then
+  bad "รหัสต้อง 6 หลัก (ที่กรอกมา ${#PAIR_CODE} หลัก)"
+  q "ถ้าคุณกรอกพอร์ตมา สคริปต์จะหาพอร์ตเอง — ใส่แค่รหัส 6 หลัก"
+  exit 1
+fi
+ok "รหัส: ${BOLD}${PAIR_CODE}${OFF}"
+
+say "3) หาพอร์ต pair แล้วจับคู่"
+
+PAIR_PORT=""
+PAIRED=0
+
+# --- 3.1 mDNS ---
+if [ -f "${SCRIPT_DIR}/find_port.py" ]; then
+  printf "  ลอง mDNS ... "
   PAIR_LINE=$(timeout 25 python "${SCRIPT_DIR}/find_port.py" --pair 2>/dev/null \
     | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$' | head -1 || true)
   if [ -n "$PAIR_LINE" ]; then
-    printf "${GREEN}เจอ${OFF}\n"
-    ok "พอร์ต pair: ${BOLD}${PAIR_LINE}${OFF}  (ไม่ต้องพิมพ์เอง)"
-    PAIR_TARGET="$PAIR_LINE"
+    printf "${GREEN}เจอ %s${OFF}\n" "$PAIR_LINE"
+    PAIR_PORT="${PAIR_LINE##*:}"
     IP="${PAIR_LINE%%:*}"
   else
     printf "${YELLOW}ไม่เจอ${OFF}\n"
   fi
 fi
 
-if [ -z "$PAIR_TARGET" ]; then
-  warn "mDNS ไม่ประกาศพอร์ต pair — ต้องพิมพ์เอง"
-  q "ในกล่องขาว มี 2 บรรทัด:"
-  q "   'รหัสการจับคู่ Wi-Fi'   → 6 หลัก  (เช่น 105022)"
-  q "   'ที่อยู่ IP และพอร์ต'    → เช่น 192.168.1.156:32887"
-  q "ช่องต่อไปนี้ต้องการ ${BOLD}ที่อยู่ IP และพอร์ต${OFF} ไม่ใช่รหัส"
-  printf "  IP:พอร์ต ในกล่องขาว: "
+# --- 3.2 ถ้า mDNS ไม่เจอ ให้สแกน ---
+CANDIDATES=""
+if [ -n "$PAIR_PORT" ]; then
+  CANDIDATES="$PAIR_PORT"
+elif [ -f "${SCRIPT_DIR}/find_port.py" ]; then
+  warn "mDNS ไม่ประกาศพอร์ต pair — จะสแกนหาพอร์ตที่เปิดอยู่แทน"
+  q "ตอนนี้กล่องจับคู่ต้องเปิดค้างอยู่ (ไม่ปิด)"
+  printf "  กำลังสแกน (อาจใช้เวลา 1-2 นาที) ... "
+  SCAN_OUT=$(timeout 240 python "${SCRIPT_DIR}/find_port.py" --scan-pair \
+    --ip "$IP" --exclude "$KNOWN_CONNECT" 2>/dev/null || true)
+  CANDIDATES=$(printf '%s\n' "$SCAN_OUT" | grep -E '^[0-9]+\.[0-9]+\.' | awk -F: '{print $NF}' | sort -n -u | tr '\n' ' ')
+  if [ -n "$CANDIDATES" ]; then
+    printf "${GREEN}เจอ %s${OFF}\n" "$(printf '%s' "$CANDIDATES" | tr -s ' ')"
+  else
+    printf "${YELLOW}ไม่เจอ${OFF}\n"
+  fi
+fi
+
+# --- 3.3 ลอง pair กับทุกพอร์ตที่เป็นไปได้ ---
+if [ -n "$CANDIDATES" ]; then
+  for p in $CANDIDATES; do
+    printf "  adb pair %s:%s ... " "$IP" "$p"
+    OUT=$(timeout 40 adb pair "${IP}:${p}" "$PAIR_CODE" 2>&1 || true)
+    case "$OUT" in
+      *Successfully\ paired*)
+        printf "${GREEN}✓${OFF}\n"; PAIRED=1; PAIR_PORT="$p"; break ;;
+      *"Wrong password"*|*"Failed: Wrong"*)
+        printf "${RED}รหัสผิด/หมดอายุ${OFF}\n"
+        break ;;
+      *)
+        printf "${DIM}%s${OFF}\n" "$(printf '%s' "$OUT" | head -1)" ;;
+    esac
+  done
+fi
+
+if [ "$PAIRED" = 0 ]; then
+  # ทางสุดท้าย: ให้พิมพ์พอร์ตเอง (กันเหนียว)
+  warn "ยังจับคู่ไม่ได้อัตโนมัติ"
+  q "กลับไปหน้า Wireless debugging → เปิด 'จับคู่กับอุปกรณ์ด้วยรหัส' ใหม่"
+  q "แล้วดูบรรทัด 'ที่อยู่ IP และพอร์ต' (เช่น 192.168.1.156:32887)"
+  printf "  พอร์ต pair (เลข 5 หลัก หรือ IP:พอร์ต): "
   read -r PAIR_IN || true
-  [ -z "$PAIR_IN" ] && { bad "ไม่ได้กรอก"; exit 1; }
   case "$PAIR_IN" in
-    *:*) : ;;
-    *) PAIR_IN="${IP}:${PAIR_IN}" ;;
+    "") : ;;
+    *:*)
+      IP="${PAIR_IN%%:*}"; PAIR_PORT="${PAIR_IN##*:}"
+      printf "  adb pair %s ... " "$PAIR_IN"
+      OUT=$(timeout 40 adb pair "$PAIR_IN" "$PAIR_CODE" 2>&1 || true)
+      printf "${DIM}%s${OFF}\n" "$(printf '%s' "$OUT" | head -1)"
+      case "$OUT" in
+        *Successfully\ paired*|*"protocol fault"*Success*) PAIRED=1 ;;
+      esac ;;
+    *)
+      PAIR_PORT="$PAIR_IN"
+      printf "  adb pair %s:%s ... " "$IP" "$PAIR_PORT"
+      OUT=$(timeout 40 adb pair "${IP}:${PAIR_PORT}" "$PAIR_CODE" 2>&1 || true)
+      printf "${DIM}%s${OFF}\n" "$(printf '%s' "$OUT" | head -1)"
+      case "$OUT" in
+        *Successfully\ paired*|*"protocol fault"*Success*) PAIRED=1 ;;
+      esac ;;
   esac
-  PAIR_TARGET="$PAIR_IN"
 fi
 
-# --- ตรวจพอร์ต ---
-PAIR_PORT="${PAIR_TARGET##*:}"
-case "$PAIR_PORT" in
-  ""|*[!0-9]*)
-    bad "พอร์ต '${PAIR_PORT}' ไม่ใช่ตัวเลข"
-    q "ดูบรรทัด 'ที่อยู่ IP และพอร์ต' ในกล่องขาวอีกครั้ง"
-    exit 1 ;;
-esac
-if [ "$PAIR_PORT" -gt 65535 ] || [ "$PAIR_PORT" -lt 1 ]; then
-  bad "พอร์ต ${PAIR_PORT} ไม่ถูกต้อง (ต้อง 1-65535)"
-  q "คุณอาจกรอกรหัส 6 หลักลงในช่องพอร์ต"
-  q "พอร์ตคือเลข ${BOLD}5 หลัก${OFF} บรรทัด 'ที่อยู่ IP และพอร์ต' (เช่น 32887)"
-  q "รหัสคือเลข ${BOLD}6 หลัก${OFF} บรรทัด 'รหัสการจับคู่ Wi-Fi' (เช่น 105022)"
-  exit 1
-fi
-[ -z "$IP" ] && IP="${PAIR_TARGET%%:*}"
+[ "$PAIRED" = 0 ] && bad "pair ไม่สำเร็จ"
 
-printf "  รหัส 6 หลัก (บรรทัด 'รหัสการจับคู่ Wi-Fi'): "
-read -r PAIR_CODE || true
-case "$PAIR_CODE" in
-  ""|*[!0-9]*) bad "รหัสต้องเป็นตัวเลขล้วน"; exit 1 ;;
-esac
-if [ "${#PAIR_CODE}" -ne 6 ]; then
-  bad "รหัสต้อง 6 หลัก (ที่กรอกมา ${#PAIR_CODE} หลัก)"
-  q "ถ้าคุณกรอกพอร์ตมา แปลว่าสลับช่อง — รหัสอยู่ในบรรทัด 'รหัสการจับคู่ Wi-Fi'"
-  exit 1
-fi
-if [ "$PAIR_CODE" = "$PAIR_PORT" ]; then
-  bad "รหัสกับพอร์ตเป็นเลขเดียวกัน — น่าจะสลับช่อง"
-  exit 1
-fi
-
-say "3) Pair"
-printf "  adb pair %s %s\n" "$PAIR_TARGET" "$PAIR_CODE"
-PAIR_OUT=$(timeout 40 adb pair "$PAIR_TARGET" "$PAIR_CODE" 2>&1 || true)
-printf '%s\n' "$PAIR_OUT" | sed 's/^/    /'
-
-PAIRED=0
-case "$PAIR_OUT" in
-  *Successfully\ paired*) PAIRED=1 ;;
-  *protocol\ fault*Success*) PAIRED=1; warn "adb รายงาน protocol fault แต่ลงท้าย Success — จะตรวจจากผลจริง" ;;
-  *"Wrong password"*) bad "รหัสผิดหรือหมดอายุ — เปิดกล่องใหม่ เอารหัสใหม่" ;;
-esac
-
-# ---------------------------------------------------------------------------
 say "4) หาพอร์ต connect แล้วเชื่อมต่อ"
 adb kill-server >/dev/null 2>&1 || true
 adb start-server >/dev/null 2>&1 || true
 
-PORTS=""
+CONNECT_PORTS=""
 if [ -f "${SCRIPT_DIR}/find_port.py" ]; then
-  PORTS=$(timeout 25 python "${SCRIPT_DIR}/find_port.py" 2>/dev/null \
-    | grep -E '^[0-9]+\.' | awk -F: '{print $NF}' | sort -n -u || true)
+  printf "  ลอง mDNS ... "
+  MDNS_PORTS=$(timeout 25 python "${SCRIPT_DIR}/find_port.py" 2>/dev/null \
+    | grep -E '^[0-9]+\.' | awk -F: '{print $NF}' | sort -n -u | tr '\n' ' ' || true)
+  if [ -n "$MDNS_PORTS" ]; then
+    printf "${GREEN}เจอ %s${OFF}\n" "$(printf '%s' "$MDNS_PORTS" | tr -s ' ')"
+    CONNECT_PORTS="$MDNS_PORTS"
+  else
+    printf "${YELLOW}ไม่เจอ${OFF}\n"
+  fi
+
+  if [ -z "$CONNECT_PORTS" ]; then
+    warn "mDNS ไม่ประกาศพอร์ต connect — จะสแกนแทน"
+    printf "  กำลังสแกน ... "
+    SCAN_OUT=$(timeout 240 python "${SCRIPT_DIR}/find_port.py" --scan-pair \
+      --ip "$IP" --exclude "${PAIR_PORT:-}" 2>/dev/null || true)
+    CONNECT_PORTS=$(printf '%s\n' "$SCAN_OUT" | grep -E '^[0-9]+\.' \
+      | awk -F: '{print $NF}' | sort -n -u | tr '\n' ' ')
+    if [ -n "$CONNECT_PORTS" ]; then
+      printf "${GREEN}เจอ %s${OFF}\n" "$(printf '%s' "$CONNECT_PORTS" | tr -s ' ')"
+    else
+      printf "${YELLOW}ไม่เจอ${OFF}\n"
+    fi
+  fi
 fi
 
-if [ -z "$PORTS" ]; then
-  warn "mDNS ไม่เจอ — อ่านจากหน้า Wireless debugging เอง"
-  printf "  พอร์ต connect (บรรทัด 'ที่อยู่ IP และพอร์ต'): "
-  read -r PORT_IN || true
-  PORTS="$PORT_IN"
+# ตัดพอร์ต pair ออก (ต่อไม่ติดแน่นอน)
+if [ -n "${PAIR_PORT:-}" ]; then
+  CONNECT_PORTS=$(printf '%s\n' $CONNECT_PORTS | grep -vx "$PAIR_PORT" | tr '\n' ' ' || true)
 fi
-[ -z "$PORTS" ] && { bad "ไม่ได้พอร์ต"; exit 1; }
-q "พอร์ตที่จะลอง: $(printf '%s' "$PORTS" | tr '\n' ' ')"
+
+if [ -z "${CONNECT_PORTS:-}" ]; then
+  warn "หาเองไม่เจอ — อ่านจากหน้า Wireless debugging"
+  q "บรรทัด 'ที่อยู่ IP และพอร์ต' (เช่น ${IP}:41087)"
+  printf "  พอร์ต connect: "
+  read -r PORT_IN || true
+  CONNECT_PORTS="$PORT_IN"
+fi
+[ -z "${CONNECT_PORTS:-}" ] && { bad "ไม่ได้พอร์ต connect"; exit 1; }
+q "พอร์ตที่จะลอง: $(printf '%s' "$CONNECT_PORTS" | tr -s ' ')"
 
 CONNECTED=0
-for p in $PORTS; do
-  for host in "$IP" 127.0.0.1; do
+HOSTS="$IP 127.0.0.1"
+[ "$IP" = "127.0.0.1" ] && HOSTS="127.0.0.1"
+for p in $CONNECT_PORTS; do
+  for host in $HOSTS; do
     printf "  %-26s " "${host}:${p}"
     OUT=$(timeout 20 adb connect "${host}:${p}" 2>&1 || true)
     printf "${DIM}%s${OFF}\n" "$OUT"
@@ -219,7 +283,6 @@ if [ "$CONNECTED" = 1 ]; then
   exit 0
 fi
 
-# ---------------------------------------------------------------------------
 DELAYED=0
 for p in $PORTS; do
   printf "  ลองซ้ำอีกรอบใน 3 วินาที: %s\n" "$p"
