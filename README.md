@@ -27,6 +27,7 @@ adb pair 127.0.0.1:PORT       # ครั้งแรกเท่านั้น
 adb connect 127.0.0.1:PORT
 
 bash go.sh                   # เริ่มที่นี่: pair + connect ครบจบในคำสั่งเดียว
+bash last-mile.sh            # ถ้าค้างที่ 'offline' — ดึงให้เป็น 'device'
 bash fix-adb.sh              # หา IP/พอร์ต + ทดสอบว่าติดตรงไหน
 bash setup-adb.sh            # pair + connect รวดเดียว
 bash find_port.sh            # หา IP:พอร์ต ADB เองแล้วเชื่อมให้ (mDNS → /proc → สแกน)

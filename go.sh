@@ -282,12 +282,23 @@ if [ "$CONNECTED" = 0 ] && [ "$(offline_count)" -gt 0 ]; then
   printf "  ${BOLD}${YELLOW}ดูหน้าจอมือถือเดี๋ยวนี้${OFF}\n"
   printf "  จะมีกล่อง ${BOLD}'Allow USB debugging?'${OFF} (อนุญาตการดีบัก USB?)\n"
   printf "  ติ๊ก ${BOLD}'Always allow from this computer'${OFF} แล้วกด ${BOLD}Allow${OFF}\n\n"
-  printf "  กำลังรอการกด Allow (สูงสุด 90 วินาที) "
+  printf "  กำลังดึงสถานะ (adb reconnect offline) สูงสุด 90 วินาที "
   deadline=$(( $(date +%s) + 90 ))
+  round=0
   while [ "$(date +%s)" -lt "$deadline" ]; do
+    # reconnect offline คือคำสั่งที่ทำให้ adb ขออนุมัติคีย์ใหม่จากมือถือ
+    adb reconnect offline >/dev/null 2>&1 || true
     if online; then break; fi
+    round=$((round + 1))
+    if [ $((round % 3)) -eq 0 ]; then
+      for s in $(adb devices 2>/dev/null | tail -n +2 | tr -d '\r' | awk '$2=="offline" {print $1}'); do
+        adb disconnect "$s" >/dev/null 2>&1 || true
+        sleep 1
+        adb connect "$s" >/dev/null 2>&1 || true
+      done
+    fi
     printf "."
-    sleep 3
+    sleep 2
   done
   printf "\n"
   if online; then
