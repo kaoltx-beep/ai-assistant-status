@@ -26,7 +26,8 @@ nano .env                     # ใส่ GEMINI_API_KEY
 adb pair 127.0.0.1:PORT       # ครั้งแรกเท่านั้น
 adb connect 127.0.0.1:PORT
 
-bash setup-adb.sh            # pair + connect รวดเดียว (แนะนำ)
+bash fix-adb.sh              # หา IP/พอร์ต + ทดสอบว่าติดตรงไหน (เริ่มที่นี่)
+bash setup-adb.sh            # pair + connect รวดเดียว
 bash find_port.sh            # หา IP:พอร์ต ADB เองแล้วเชื่อมให้ (mDNS → /proc → สแกน)
 python -m android_agent --check
 python -m android_agent "เปิด Settings ดูเลข Android version"

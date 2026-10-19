@@ -110,6 +110,26 @@ List of devices attached
 192.168.1.156:37223	device
 ```
 
+### ถ้าต่อไม่ติด — รันตัววินิจฉัยก่อน
+
+```bash
+bash fix-adb.sh
+```
+
+สคริปต์นี้ตอบได้ว่า "ติดตรงไหน" ไม่ใช่แค่ "ไม่ติด":
+
+| สิ่งที่ตรวจ | ถ้าผิดจะบอกว่า |
+|---|---|
+| IP (ผ่าน termux-api / UDP socket) | หา IP ไม่ได้ → Wi-Fi ไม่ได้ต่อ |
+| พอร์ตจาก mDNS | ไม่มีพอร์ต → Wireless debugging ปิด |
+| TCP probe ทีละพอร์ต | พอร์ตตาย → ประกาศค้าง ต้องปิด-เปิดใหม่ |
+| `adb connect` + `adb devices` | `unauthorized` → ต้องกด Allow |
+| คีย์ pair | พอร์ตเปิดแต่ต่อไม่ได้ → pair ไม่จริง ต้อง pair ใหม่ |
+
+> 📌 บน Android 15 คำสั่ง `settings get ...` ถูกบล็อก
+> (`Failed transaction (2147483646)`) และ Termux อาจไม่มี `ip`/`ifconfig`
+> สคริปต์นี้จึงอ่าน IP จาก `termux-wifi-connectioninfo` และ UDP socket แทน
+
 ### ถ้าต่อไม่ติด — ใช้ตัวช่วยอัตโนมัติ
 
 ```bash
