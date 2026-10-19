@@ -49,7 +49,43 @@ for probe in ("1.1.1.1","8.8.8.8"):
   return 1
 }
 
-online() { adb devices 2>/dev/null | tail -n +2 | grep -qE '[[:space:]]device([[:space:]]|$)'; }
+online() { adb devices 2>/dev/null | tail -n +2 | tr -d '\r' | awk '$2=="device"' | grep -q .; }
+
+# adb lists a transport as 'offline' while it waits for the phone to approve
+# our key. That state is recoverable: the user just has to tap Allow.
+offline_count() {
+  adb devices 2>/dev/null | tail -n +2 | tr -d '\r' | awk '$2=="offline"' | grep -c . || true
+}
+
+unauthorized_count() {
+  adb devices 2>/dev/null | tail -n +2 | tr -d '\r' | awk '$2=="unauthorized"' | grep -c . || true
+}
+
+# Wait up to $1 seconds for any transport to reach 'device'.
+wait_online() {
+  local deadline=$(( $(date +%s) + ${1:-20} ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    online && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# Try the currently listed transports again — adb often needs a second nudge
+# after the phone has approved the key.
+retry_existing_transports() {
+  local serials
+  serials=$(adb devices 2>/dev/null | tail -n +2 | awk '{print $1}' | grep -E ':[0-9]+$' || true)
+  [ -z "$serials" ] && return 1
+  for s in $serials; do
+    adb disconnect "$s" >/dev/null 2>&1 || true
+  done
+  sleep 1
+  for s in $serials; do
+    adb connect "$s" >/dev/null 2>&1 || true
+  done
+  wait_online 15
+}
 
 mdns_ports() {  # $1 = "" | "--pair"
   [ -f "$FINDER" ] || return 0
@@ -236,11 +272,33 @@ for p in $LIVE_PORTS; do
     printf "  %-24s " "${host}:${p}"
     OUT=$(timeout 20 adb connect "${host}:${p}" 2>&1 || true)
     printf "${DIM}%s${OFF}\n" "$OUT"
-    if online; then CONNECTED=1; break 2; fi
+    if wait_online 6; then CONNECTED=1; break 2; fi
   done
 done
 
-# ถ้าต่อไม่ติดทั้งที่พอร์ตเปิดอยู่ ให้สแกนใหม่แล้วลองอีกรอบ
+# --- offline = รอให้กด Allow บนมือถือ -------------------------------------
+if [ "$CONNECTED" = 0 ] && [ "$(offline_count)" -gt 0 ]; then
+  say "มือถือรอการอนุญาตอยู่"
+  printf "  ${BOLD}${YELLOW}ดูหน้าจอมือถือเดี๋ยวนี้${OFF}\n"
+  printf "  จะมีกล่อง ${BOLD}'Allow USB debugging?'${OFF} (อนุญาตการดีบัก USB?)\n"
+  printf "  ติ๊ก ${BOLD}'Always allow from this computer'${OFF} แล้วกด ${BOLD}Allow${OFF}\n\n"
+  printf "  กำลังรอการกด Allow (สูงสุด 90 วินาที) "
+  deadline=$(( $(date +%s) + 90 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if online; then break; fi
+    printf "."
+    sleep 3
+  done
+  printf "\n"
+  if online; then
+    CONNECTED=1
+  else
+    warn "ยังไม่เห็นการกด Allow — จะลองเชื่อมต่อใหม่ให้"
+    if retry_existing_transports; then CONNECTED=1; fi
+  fi
+fi
+
+# ถ้าต่อไม่ติดทั้งที่พอร์ตเปิดอยู่ ให้สแกนใหม่แล้วลองอีกครั้ง
 if [ "$CONNECTED" = 0 ]; then
   warn "ต่อไม่ติดกับพอร์ตที่ลองไป — สแกนใหม่แล้วลองอีกครั้ง"
   printf "  สแกน ... "
@@ -257,7 +315,7 @@ if [ "$CONNECTED" = 0 ]; then
         printf "  %-24s " "${host}:${p}"
         OUT=$(timeout 20 adb connect "${host}:${p}" 2>&1 || true)
         printf "${DIM}%s${OFF}\n" "$OUT"
-        if online; then CONNECTED=1; break 2; fi
+        if wait_online 6; then CONNECTED=1; break 2; fi
       done
     done
   else
@@ -279,10 +337,16 @@ adb devices -l 2>/dev/null | sed 's/^/    /'
 bad "ยังเชื่อมไม่ได้"
 cat <<EOF
 
-  ทำ 2 อย่างแล้วลอง ${BOLD}bash go.sh${OFF} อีกครั้ง:
-    1. ปิด-เปิด Wireless debugging
-    2. ตอนสคริปต์ connect ให้${BOLD}มองหน้าจอมือถือ${OFF} — ถ้าเด้ง
-       'Allow USB debugging?' ให้กด ${BOLD}Allow${OFF}
+  ถ้าขึ้น ${BOLD}offline${OFF} = มือถือยังไม่ได้อนุมัติคีย์
+     → ดูหน้าจอมือถือ กด ${BOLD}Allow${OFF} (ติ๊ก 'Always allow from this computer' ด้วย)
+
+  ถ้าไม่มีกล่องเด้งเลย ให้ทำ 2 ข้อนี้แล้วลองใหม่:
+    1. Developer options → เปิด ${BOLD}USB debugging${OFF}
+    2. Developer options → เปิด ${BOLD}'ปิดการตรวจสอบสิทธิ์'${OFF}
+       (Disable permission monitoring) — ถ้าไม่เปิด ColorOS จะเพิกถอนสิทธิ์เอง
+
+  ถ้ายังไม่หาย: ล้างคีย์แล้ว pair ใหม่
+    ${BOLD}bash repair-pair.sh${OFF}
 
 EOF
 exit 1
