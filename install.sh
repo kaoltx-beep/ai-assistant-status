@@ -142,19 +142,56 @@ else
   ask "  ต้องการเชื่อมต่อเลยไหม? [y/N]: "
   read -r ANS || true
   if [ "${ANS:-}" = "y" ] || [ "${ANS:-}" = "Y" ]; then
-    ask "  พิมพ์พอร์ตจากหน้า 'Pair device with pairing code' (เช่น 37123): "
-    read -r PAIR_PORT || true
-    if [ -n "${PAIR_PORT:-}" ]; then
-      printf "  (ระบบจะถามรหัส 6 หลัก — พิมพ์ตามหน้าจอมือถือ)\n"
-      adb pair "127.0.0.1:${PAIR_PORT}" || warn "pair ไม่สำเร็จ ลองใหม่ได้"
+    printf "\n  ${BOLD}อ่านก่อนทำ:${OFF}\n"
+    printf "   • ต้องเห็นหน้า 'Pair device with pairing code' พร้อมกันตอนพิมพ์\n"
+    printf "     → ใช้ split screen (กดปุ่มRecent → กดค้างที่ Termux → Split screen)\n"
+    printf "   • หน้า pair มีเลข ${BOLD}2 ชุด${OFF} ที่ต่างกัน:\n"
+    printf "       หมายเลขพอร์ต 5 หลัก  (ในหัวข้อ 'Wi-Fi pairing code' เช่น 37123)\n"
+    printf "       รหัส pair  6 หลัก     (บรรทัด 'Pairing code' เช่น 482913)\n"
+    printf "   • ถ้าหน้าต่าง pair ปิดไป ต้องกลับไปเปิดใหม่ (รหัสจะเปลี่ยนทุกครั้ง)\n\n"
+
+    attempt=1
+    paired=0
+    while [ "$attempt" -le 3 ] && [ "$paired" = 0 ]; do
+      printf "  ${DIM}--- ครั้งที่ %s จาก 3 ---${OFF}\n" "$attempt"
+      ask "  พอร์ต pair (เช่น 37123): "
+      read -r PAIR_PORT || true
+      ask "  รหัส pair 6 หลัก (เช่น 482913): "
+      read -r PAIR_CODE || true
+
+      if [ -z "${PAIR_PORT:-}" ] || [ -z "${PAIR_CODE:-}" ]; then
+        warn "ต้องใส่ทั้งพอร์ตและรหัส"
+      else
+        set -- pair "127.0.0.1:${PAIR_PORT}" "${PAIR_CODE}"
+        if out=$(adb "$@" 2>&1); then
+          printf '%s\n' "$out" | sed 's/^/    /'
+          paired=1
+        else
+          printf '%s\n' "$out" | sed 's/^/    /'
+          warn "pair ไม่สำเร็จ"
+          printf "    ตรวจว่า: หน้าต่าง pair ยังเปิดอยู่ / รหัสเป็น 6 หลัก / พอร์ตตรงกับหน้าจอ\n"
+          printf "    ถ้ายังไม่หาย: ปิด-เปิด Wireless debugging ใหม่ แล้วขอรหัสใหม่\n"
+        fi
+      fi
+      attempt=$((attempt + 1))
+    done
+
+    if [ "$paired" = 1 ]; then
+      ok "pair สำเร็จ"
+    else
+      warn "pair ไม่สำเร็จครบ 3 ครั้ง — ข้ามไปก่อน แล้วทำทีหลังได้"
     fi
 
-    ask "  พิมพ์พอร์ตจากหน้า 'Wireless debugging' (เช่น 5555): "
+    ask "  พอร์ตจากหน้า 'Wireless debugging' (เช่น 5555): "
     read -r CONN_PORT || true
     if [ -n "${CONN_PORT:-}" ]; then
       adb connect "127.0.0.1:${CONN_PORT}" || true
       sleep 1
       adb devices
+      if ! adb devices 2>/dev/null | tail -n +2 | grep -q "device$"; then
+        printf "\n  ${YELLOW}ยังไม่เห็น device${OFF} — ลอง:\n"
+        printf "    adb kill-server && adb connect 127.0.0.1:%s\n" "$CONN_PORT"
+      fi
     fi
   else
     warn "ข้ามไปก่อน — เชื่อมต่อทีหลังได้ด้วยคำสั่ง: adb pair 127.0.0.1:พอร์ต"

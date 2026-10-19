@@ -54,16 +54,37 @@ adb version          # ควรได้ Android Debug Bridge version ...
 
 ## 4. เชื่อม Termux เข้ากับมือถือ (ADB ไร้สาย)
 
-1. ในหน้า **Wireless debugging** แตะ **Pair device with pairing code**
-2. จะเห็นหน้าต่างบอก **IP:port** และ **6 หลัก code** — อย่าปิดหน้านี้
-3. กลับมาที่ Termux แล้วรัน (เปลี่ยนตัวเลขตามที่เห็น):
+หน้านี้คือจุดที่คนพลาดมากที่สุด เพราะมี **ตัวเลข 2 ชุดที่หน้าตาคล้ายกัน**
+
+| ตัวเลข | หน้าตา | ใช้ทำอะไร |
+|---|---|---|
+| **พอร์ต pair** | 5 หลัก เช่น `37123` | ต่อท้าย `adb pair 127.0.0.1:` |
+| **รหัส pair** | 6 หลัก เช่น `482913` | ใส่ตอน adb ถาม หรือต่อท้ายคำสั่ง |
+
+> ⚠️ **รหัส pair ไม่ใช่เลขเดียวกับพอร์ต** — ถ้าใส่พอร์ตซ้ำลงไปจะขึ้น
+> `error: protocol fault (couldn't read status message)`
+
+### ทำไมต้องใช้ split screen
+
+หน้าต่าง "Pair device with pairing code" **จะปิดทันทีที่คุณสลับแอป** ถ้าเปิด Termux เต็มจอ
+รหัสจะหายก่อนได้ใช้ ให้แบ่งจอ:
+
+1. เปิด **Settings → System → Developer options → Wireless debugging**
+2. แตะ **Pair device with pairing code** (หน้าต่างจะเด้งขึ้นมา)
+3. กดปุ่ม **Recent apps** → กดค้างที่การ์ดของ **Termux** → เลือก **Split screen**
+4. ตอนนี้ครึ่งบนเป็นหน้าต่าง pair ครึ่งล่างเป็น Termux — เห็นทั้งคู่พร้อมกัน
+
+### เชื่อมต่อ
 
 ```bash
-adb pair 127.0.0.1:37123
-# ระบบจะถาม pairing code → พิมพ์ 6 หลักนั้นแล้ว Enter
+# ใส่รหัสเป็นพารามิเตอร์ตัวที่ 2 (ไม่ต้องตอบคำถาม interactive)
+adb pair 127.0.0.1:37123 482913
 ```
 
-4. กลับไปหน้าก่อนหน้า **Wireless debugging** ดูว่า **IP address & Port** คืออะไร (คนละพอร์ตกับตอน pair) แล้วรัน:
+ถ้าสำเร็จจะขึ้น `Successfully paired to 127.0.0.1:37123`
+
+จากนั้นกลับไปหน้า **Wireless debugging** ดูบรรทัด **IP address & Port**
+(เช่น `127.0.0.1:5555`) แล้วรัน:
 
 ```bash
 adb connect 127.0.0.1:5555     # เปลี่ยน 5555 ตามที่หน้า Wireless debugging บอก
@@ -77,11 +98,21 @@ List of devices attached
 127.0.0.1:5555	device
 ```
 
-ถ้าขึ้น `offline` ให้รัน `adb kill-server` แล้ว `adb connect ...` ใหม่
+### ถ้ายังไม่สำเร็จ
 
-> 💡 พอร์ตจะเปลี่ยนทุกครั้งที่รีบูตมือถือ — ถ้าเจอ "ไม่พบอุปกรณ์" ให้กลับมาทำข้อ 3–4 ใหม่ (ใช้ไม่ถึง 1 นาที)
+| อาการ | วิธีแก้ |
+|---|---|
+| `protocol fault (couldn't read status message)` | ใส่รหัส 5 หลักจากพอร์ต → ต้องเป็น **6 หลัก** |
+| `Failed: Wrong password` | รหัสเก่า/หน้าต่างปิดแล้ว → เปิด pair ใหม่ เอารหัสใหม่ |
+| `failed to connect` | ใช้พอร์ต pair แทนพอร์ต connect → ดูบรรทัด `IP address & Port` |
+| ขึ้น `offline` | `adb kill-server && adb connect 127.0.0.1:5555` |
+| หน้าต่าง pair ปิดเอง | ใช้ split screen (ด้านบน) |
 
----
+> 💡 พอร์ตทั้งสองตัวเปลี่ยนทุกครั้งที่รีบูตหรือเปิด-ปิด Wireless debugging
+> ถ้าเจอ "ไม่พบอุปกรณ์" ให้กลับมาทำข้อ 4 ใหม่ (ใช้ไม่ถึง 1 นาที)
+
+> 💡 ในตัวติดตั้ง `install.sh` มีให้ลองได้ 3 ครั้ง และไม่ต้องตอบคำถาม interactive
+> — มันส่งรหัสให้ adb ตรง ๆ
 
 ## 5. ให้พิมพ์ภาษาไทยได้ (ADBKeyboard)
 
