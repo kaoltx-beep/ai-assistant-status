@@ -17,6 +17,22 @@ ask()  { printf "%s" "$*"; }
 IS_TERMUX=0
 [ -d /data/data/com.termux/files/usr ] && IS_TERMUX=1
 
+# Known Termux packaging bug: python3.1x and python3.1x-ensurepip-wheels both
+# claim .../ensurepip/_bundled/pip-*.whl, so dpkg aborts with
+# "trying to overwrite ... which is also in package ...".
+# Force the new interpreter to take ownership, then let apt settle.
+repair_termux_dpkg() {
+  say "พบปัญหาแพ็กเกจชนกัน (ensurepip) — กำลังซ่อมให้"
+  apt --fix-broken install -y || true
+  ( cd "$HOME" && apt download python3.11 python3.13 >/dev/null 2>&1 ) || true
+  if ls "$HOME"/python3.11_*.deb >/dev/null 2>&1; then
+    ( cd "$HOME" && dpkg -i --force-overwrite ./python3.11_*.deb ./python3.13_*.deb ) || true
+  fi
+  rm -f "$HOME"/python3.11_*.deb "$HOME"/python3.13_*.deb
+  apt --fix-broken install -y || true
+  ok "ซ่อมเสร็จแล้ว"
+}
+
 pause() {
   printf "\n${DIM}กด Enter เพื่อไปต่อ...${OFF}"
   read -r _ || true
@@ -35,8 +51,12 @@ if [ "$IS_TERMUX" = 1 ]; then
     say "กำลังติดตั้ง python / android-tools / git (3-5 นาที ไม่ต้องกดอะไร)"
     pkg update -y >/dev/null 2>&1 || true
     if ! pkg install -y python android-tools git; then
-      bad "ติดตั้งไม่สำเร็จ — ลองรันเอง: pkg install -y python android-tools git"
-      exit 1
+      warn "ติดตั้งรอบแรกไม่สำเร็จ — ลองซ่อมแพ็กเกจแล้วติดตั้งซ้ำ"
+      repair_termux_dpkg
+      if ! pkg install -y python android-tools git; then
+        bad "ติดตั้งไม่สำเร็จ — ลองรันเอง: pkg install -y python android-tools git"
+        exit 1
+      fi
     fi
   fi
 else
