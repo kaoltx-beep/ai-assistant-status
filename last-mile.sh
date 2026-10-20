@@ -68,9 +68,11 @@ cat <<EOF
     (เพิกถอนการอนุญาตการดีบัก USB) → กด OK
 
   ${BOLD}ทาง B — ถ้าไม่เคยเห็นเลย${OFF}
-    Settings → System → Developer options → เปิด ${BOLD}USB debugging${OFF}
-    และถ้ามี ให้เปิด ${BOLD}'Disable permission monitoring'${OFF}
-    (ปิดการตรวจสอบสิทธิ์)
+    Settings → System → Developer options → เปิด ${BOLD}'USB debugging'${OFF}
+    (ภาษาไทย: การแก้ไขข้อบกพร่อง USB)
+    และเปิด ${BOLD}'Disable adb authorization timeout'${OFF}
+    (ภาษาไทย: ${BOLD}ปิดใช้ระยะหมดเวลาการให้สิทธิ์ adb${OFF}) — ข้อนี้ทำให้
+    สิทธิ์ไม่ถูกเพิกถอนเอง ซึ่งเป็นสาเหตุที่สถานะค้าง offline บ่อยที่สุด
 
   ${BOLD}สำคัญ: ปลดล็อกหน้าจอค้างไว้ + อย่าให้จอดับ${OFF}
 
