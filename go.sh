@@ -210,9 +210,17 @@ fi
 # ---------------------------------------------------------------------------
 say "เชื่อมต่อ"
 
-# หลัง pair adbd จะเปิด listener ใหม่ พอร์ตเก่าที่ mDNS ประกาศไว้มักใช้ไม่ได้แล้ว
-q "รอ 2 วินาทีให้ adbd เปิดพอร์ตใหม่ ..."
-sleep 2
+# สำคัญ: พอร์ต pair ยังเปิดอยู่ตราบใดที่กล่องจับคู่ยังเปิด
+# ถ้าเอาไป connect จะได้สถานะ offline ค้างตลอด (พอร์ต pair ใช้ TLS-PSK ไม่ใช่ ADB ปกติ)
+printf "\n  ${BOLD}${YELLOW}ปิดกล่อง 'จับคู่กับอุปกรณ์' บนมือถือก่อน${OFF}\n"
+printf "  แตะ ${BOLD}ยกเลิก${OFF} หรือกดปุ่มย้อนกลับ — ให้กล่องหายไป\n"
+printf "  (พอร์ต pair จะปิดตาม แล้วเหลือแต่พอร์ต connect)\n\n"
+printf "  ปิดกล่องแล้วกด Enter: "
+read -r _ || true
+
+printf "  รอ 3 วินาทีให้ adbd เปิดพอร์ต connect ... "
+sleep 3
+printf "done\n"
 adb kill-server >/dev/null 2>&1 || true
 adb start-server >/dev/null 2>&1 || true
 
@@ -273,6 +281,10 @@ for p in $LIVE_PORTS; do
     OUT=$(timeout 20 adb connect "${host}:${p}" 2>&1 || true)
     printf "${DIM}%s${OFF}\n" "$OUT"
     if wait_online 6; then CONNECTED=1; break 2; fi
+    # ถ้าค้าง offline ให้ตัดทิ้ง ไม่งั้นจะบังพอร์ตถัดไป
+    if adb devices 2>/dev/null | tail -n +2 | tr -d '\r' | awk '$2=="offline" {print $1}' | grep -qx "${host}:${p}"; then
+      adb disconnect "${host}:${p}" >/dev/null 2>&1 || true
+    fi
   done
 done
 
