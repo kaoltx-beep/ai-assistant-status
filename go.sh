@@ -360,4 +360,16 @@ cat <<EOF
     ${BOLD}bash repair-pair.sh${OFF}
 
 EOF
+
+# ถ้ามี transport ค้าง offline อยู่ ให้ลองดึงต่อทันที
+if [ -n "$(adb devices 2>/dev/null | tail -n +2 | tr -d '\r' | awk '$2=="offline" {print $1}')" ]; then
+  if [ -f "${SCRIPT_DIR}/last-mile.sh" ]; then
+    say "พบ transport ที่ค้าง offline — กำลังดึงให้เป็น device"
+    printf "  ${BOLD}มองหน้าจอมือถือไว้${OFF} ถ้ามีกล่อง Allow ให้กด Allow\n\n"
+    if bash "${SCRIPT_DIR}/last-mile.sh" </dev/null; then
+      exit 0
+    fi
+  fi
+fi
+
 exit 1
