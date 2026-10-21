@@ -351,8 +351,32 @@ def device_is_online(text: str) -> bool:
     return False
 
 
-def try_connect(hosts: list[str], port: int) -> tuple[bool, str]:
-    """Try adb connect for each host; return (ok, last_output)."""
+def transport_state(target: str) -> str:
+    """State adb reports for one transport: device / offline / unauthorized / ''."""
+    for line in adb_devices().splitlines():
+        parts = line.replace("\r", "").split()
+        if len(parts) >= 2 and parts[0] == target and parts[0] != "List":
+            return parts[1]
+    return ""
+
+
+def disconnect(target: str) -> None:
+    try:
+        subprocess.run(
+            ["adb", "disconnect", target], capture_output=True, text=True, timeout=15
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def try_connect(hosts: list[str], port: int, wait: float = 4.0) -> tuple[bool, str]:
+    """Try adb connect for each host and wait until the transport is really 'device'.
+
+    adb prints "connected to X" before the TLS handshake finishes, so the
+    message proves nothing. A transport that never leaves 'offline' is a ghost
+    (usually some other app's socket, or a stale port) and is dropped at once:
+    leaving them behind makes every later attempt worse.
+    """
     last = ""
     for host in hosts:
         target = f"{host}:{port}"
@@ -373,14 +397,50 @@ def try_connect(hosts: list[str], port: int) -> tuple[bool, str]:
             print(f"  {last}")
 
         lowered = last.lower()
-        if "connected" in lowered and "failed" not in lowered and "cannot" not in lowered:
-            if device_is_online(adb_devices()):
-                return True, last
         if "unauthorized" in lowered:
             print("  → ดูหน้าจอมือถือ กด Allow")
-        if "refused" in lowered:
+        if any(word in lowered for word in ("refused", "failed", "cannot", "unable")):
             print("  → พอร์ตนี้ไม่มีอะไรรอรับ (อาจเก่าไปแล้ว)")
+            disconnect(target)
+            continue
+
+        deadline = time.time() + wait
+        state = ""
+        while time.time() < deadline:
+            state = transport_state(target)
+            if state == "device":
+                return True, last
+            if state == "unauthorized":
+                print("  → รอการอนุญาตบนมือถือ (Allow USB debugging)")
+            time.sleep(0.4)
+
+        print(f"  → ค้างที่ '{state or 'unknown'}' — ตัดทิ้ง")
+        disconnect(target)
     return False, last
+
+
+def scan_candidates(exclude: set[int], limit: int = 40) -> list[tuple[str, int]]:
+    """TCP-probe the wireless-debugging port range on addresses of this device.
+
+    Probing only says "somebody listens here"; try_connect() decides whether it
+    is really adbd. Loopback goes first because it answers instantly.
+    """
+    found: list[tuple[str, int]] = []
+    for ip in local_ips(include_loopback=True):
+        print(f"  สแกน {ip} ...", flush=True)
+        try:
+            ports = scan_open_ports(ip, 30000, 50000)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for port in ports:
+            if port in exclude:
+                continue
+            found.append((ip, port))
+            if len(found) >= limit:
+                return found
+        if found:
+            return found
+    return found
 
 
 def fmt_pairs(pairs: list[tuple[str, int]]) -> str:
@@ -448,17 +508,21 @@ def main(argv: list[str] | None = None) -> int:
     pairs = discover()
 
     if not pairs:
-        print("ไม่พบ (mDNS อาจถูกบล็อก/ไม่ทำงานบนเครื่องนี้)", file=sys.stderr)
-        return 1
-
-    print(fmt_pairs(pairs))
+        print("ไม่พบผ่าน mDNS (อาจถูกบล็อก/ไม่ทำงานบนเครื่องนี้)", file=sys.stderr)
+        if not args.connect:
+            return 1
+    else:
+        print(fmt_pairs(pairs))
 
     if not args.connect:
         return 0
 
+    tried: set[int] = set()
+
     # Termux runs on the phone itself: the loopback route often works when the
     # LAN route does not (and vice versa), so try both for every discovered port.
     for ip, port in pairs:
+        tried.add(port)
         hosts = ["127.0.0.1", ip] if ip != "127.0.0.1" else ["127.0.0.1"]
         ok, _ = try_connect(hosts, port)
         if ok:
@@ -466,7 +530,25 @@ def main(argv: list[str] | None = None) -> int:
             print(adb_devices().strip())
             return 0
 
+    # mDNS on Android is unreliable (stale records, blocked multicast), so fall
+    # back to probing the port range and letting adb itself decide.
+    print("\nmDNS ไม่ได้ผล — สแกนพอร์ตแทน", flush=True)
+    candidates = scan_candidates(tried)
+    if not candidates:
+        print("ไม่พบพอร์ตที่เปิดอยู่เลย", file=sys.stderr)
+        return 1
+
+    for ip, port in candidates:
+        hosts = ["127.0.0.1", ip] if ip != "127.0.0.1" else ["127.0.0.1"]
+        ok, _ = try_connect(hosts, port, wait=2.5)
+        if ok:
+            print("\n✓ เชื่อมต่อสำเร็จ")
+            print(adb_devices().strip())
+            return 0
+
     print("\n✗ เชื่อมต่อไม่สำเร็จทุกพอร์ตที่เจอ", file=sys.stderr)
+    print("   ลองอ่านพอร์ตจากหน้า Wireless debugging แล้วสั่งเอง:", file=sys.stderr)
+    print("     adb connect localhost:<พอร์ต>", file=sys.stderr)
     return 1
 
 
