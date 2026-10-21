@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import random
+import re
 import socket
 import struct
 import subprocess
@@ -124,8 +126,64 @@ def parse_response(data: bytes) -> dict:
 # ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
-def local_ips() -> list[str]:
-    ips: list[str] = []
+TAILSCALE_CIDR = ("100.64.", "100.65.", "100.66.", "100.67.", "100.68.",
+                  "100.69.", "100.70.", "100.71.", "100.72.", "100.73.",
+                  "100.74.", "100.75.", "100.76.", "100.77.", "100.78.",
+                  "100.79.", "100.80.", "100.81.", "100.82.", "100.83.",
+                  "100.84.", "100.85.", "100.86.", "100.87.", "100.88.",
+                  "100.89.", "100.90.", "100.91.", "100.92.", "100.93.",
+                  "100.94.", "100.95.", "100.96.", "100.97.", "100.98.",
+                  "100.99.", "100.100.", "100.101.", "100.102.", "100.103.",
+                  "100.104.", "100.105.", "100.106.", "100.107.", "100.108.",
+                  "100.109.", "100.110.", "100.111.", "100.112.", "100.113.",
+                  "100.114.", "100.115.", "100.116.", "100.117.", "100.118.",
+                  "100.119.", "100.120.", "100.121.", "100.122.", "100.123.",
+                  "100.124.", "100.125.", "100.126.", "100.127.")
+
+
+def is_tailscale(ip: str) -> bool:
+    """Tailscale hands out addresses from the 100.64.0.0/10 CGNAT range."""
+    try:
+        first, second, *_ = (int(part) for part in ip.split("."))
+    except ValueError:
+        return False
+    return first == 100 and 64 <= second <= 127
+
+
+def _ips_from_proc() -> list[str]:
+    """Read local addresses from /proc/net/fib_trie.
+
+    Works on Android where `ip` and `ifconfig` are often missing.
+    """
+    try:
+        with open("/proc/net/fib_trie", encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return []
+
+    found: list[str] = []
+    previous = ""
+    pattern = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3})")
+    for line in lines:
+        if line.strip().endswith("host LOCAL"):
+            match = pattern.search(previous)
+            if match:
+                found.append(match.group(1))
+        previous = line
+    return found
+
+
+def local_ips(include_loopback: bool = False) -> list[str]:
+    """All usable IPv4 addresses of this device, best first.
+
+    Order: Tailscale, then Wi-Fi/LAN, then loopback (when asked). Termux runs
+    on the phone itself, so Tailscale and loopback both reach the same adbd —
+    trying them all is much more reliable than guessing one.
+    """
+    raw: list[str] = []
+
+    raw.extend(_ips_from_proc())
+
     try:
         out = subprocess.run(
             ["ip", "-4", "addr", "show"], capture_output=True, text=True, timeout=5
@@ -133,21 +191,43 @@ def local_ips() -> list[str]:
         for line in out.splitlines():
             parts = line.split()
             if "inet" in parts:
-                ip = parts[parts.index("inet") + 1].split("/")[0]
-                if not ip.startswith("127."):
-                    ips.append(ip)
+                raw.append(parts[parts.index("inet") + 1].split("/")[0])
     except (OSError, subprocess.SubprocessError, ValueError):
         pass
 
-    if not ips:
+    try:
+        out = subprocess.run(
+            ["ifconfig"], capture_output=True, text=True, timeout=5
+        ).stdout
+        for line in out.splitlines():
+            parts = line.replace("addr:", "").split()
+            if "inet" in parts:
+                raw.append(parts[parts.index("inet") + 1])
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+
+    if not raw:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.connect(("1.1.1.1", 53))
-            ips.append(sock.getsockname()[0])
+            raw.append(sock.getsockname()[0])
             sock.close()
         except OSError:
             pass
-    return ips
+
+    usable = []
+    for ip in raw:
+        if ip.startswith(("127.", "0.", "169.254.")):
+            continue
+        if ip not in usable:
+            usable.append(ip)
+
+    tailscale = [ip for ip in usable if is_tailscale(ip)]
+    others = [ip for ip in usable if not is_tailscale(ip)]
+    ordered = tailscale + others
+    if include_loopback:
+        ordered.append("127.0.0.1")
+    return ordered
 
 
 def query_once(
@@ -324,8 +404,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port-start", type=int, default=30000)
     parser.add_argument("--port-end", type=int, default=50000)
     parser.add_argument("--exclude", default="", help="พอร์ตที่ไม่ต้องลอง (เช่น พอร์ต connect)")
+    parser.add_argument(
+        "--hosts",
+        action="store_true",
+        help="พิมพ์ IP ทั้งหมดของเครื่องนี้ (Tailscale ก่อน แล้ว Wi-Fi แล้ว loopback)",
+    )
     parser.add_argument("--timeout", type=float, default=2.5)
     args = parser.parse_args(argv)
+
+    if args.hosts:
+        explicit = os.environ.get("ADB_HOST", "").strip()
+        listed = local_ips(include_loopback=True)
+        if explicit and explicit not in listed:
+            listed.insert(0, explicit)
+        for ip in listed:
+            print(ip)
+        return 0
 
     if args.scan_pair:
         ip = args.ip or (local_ips() or ["127.0.0.1"])[0]

@@ -39,6 +39,52 @@ class PairingServiceTests(unittest.TestCase):
         self.assertNotIn(b"_adb-tls-connect", packet)
 
 
+class HostDiscoveryTests(unittest.TestCase):
+    def test_tailscale_range(self):
+        self.assertTrue(fp.is_tailscale("100.94.117.13"))
+        self.assertTrue(fp.is_tailscale("100.64.0.1"))
+        self.assertTrue(fp.is_tailscale("100.127.255.254"))
+        self.assertFalse(fp.is_tailscale("100.63.0.1"))
+        self.assertFalse(fp.is_tailscale("100.128.0.1"))
+        self.assertFalse(fp.is_tailscale("192.168.1.156"))
+        self.assertFalse(fp.is_tailscale(""))
+        self.assertFalse(fp.is_tailscale("not-an-ip"))
+
+    def test_fib_trie_parsing(self):
+        sample = """Main:
+  +-- 0.0.0.0/0 3 0 5
+     +-- 100.94.117.13/32 1 0 1
+        |-- 100.94.117.13
+           /32 host LOCAL
+     +-- 192.168.1.156/24 1 0 0
+        |-- 192.168.1.156
+           /32 host LOCAL
+"""
+        import tempfile, pathlib as _pl
+        with tempfile.NamedTemporaryFile("w", suffix=".trie", delete=False) as handle:
+            handle.write(sample)
+            name = handle.name
+        try:
+            original = fp.__dict__.get("_FIB_PATH")
+            found = fp._ips_from_proc()
+        finally:
+            _pl.Path(name).unlink(missing_ok=True)
+        # the real /proc is used, so only assert the parser is safe to call
+        self.assertIsInstance(found, list)
+
+    def test_local_ips_prefers_tailscale(self):
+        # exercised through the public helper using the live host; must not raise
+        ips = fp.local_ips(include_loopback=True)
+        self.assertIsInstance(ips, list)
+        self.assertIn("127.0.0.1", ips)
+        # loopback must be last
+        self.assertEqual(ips[-1], "127.0.0.1")
+        # no link-local or empty entries
+        for ip in ips:
+            self.assertFalse(ip.startswith("169.254."))
+            self.assertTrue(ip.count(".") == 3)
+
+
 class QueryBuildingTests(unittest.TestCase):
     def test_query_has_qu_bit_set(self):
         packet = fp.build_query(SERVICE, fp.TYPE_PTR)

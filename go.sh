@@ -22,6 +22,16 @@ q()    { printf "  ${DIM}%s${OFF}\n" "$*"; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "$PWD")"
 FINDER="${SCRIPT_DIR}/find_port.py"
 
+# รับ IP ได้จาก: --host=IP, อาร์กิวเมนต์ตัวแรก, หรือ env ADB_HOST
+HOST_ARG="${ADB_HOST:-}"
+for arg in "$@"; do
+  case "$arg" in
+    --host=*) HOST_ARG="${arg#*=}" ;;
+    *[!0-9.]*|"") : ;;
+    *.*) [ -z "$HOST_ARG" ] && HOST_ARG="$arg" ;;
+  esac
+done
+
 command -v adb >/dev/null 2>&1 || { bad "ไม่พบ adb — pkg install android-tools"; exit 1; }
 
 detect_ip() {
@@ -94,10 +104,15 @@ mdns_ports() {  # $1 = "" | "--pair"
     | awk -F: '{print $NF}' | sort -n -u | tr '\n' ' '
 }
 
-scan_ports() {  # $1 = exclude list
+scan_ports() {  # $1 = exclude list ; สแกนทุก IP แล้วรวมผล
   [ -f "$FINDER" ] || return 0
-  timeout 200 python "$FINDER" --scan-pair --ip "$IP" --exclude "${1:-}" 2>/dev/null \
-    | grep -E '^[0-9]+\.' | awk -F: '{print $NF}' | sort -n -u | tr '\n' ' '
+  local h out all=""
+  for h in ${HOST_LIST:-$IP}; do
+    out=$(timeout 90 python "$FINDER" --scan-pair --ip "$h" --exclude "${1:-}" 2>/dev/null \
+      | grep -E '^[0-9]+\.' | awk -F: '{print $NF}' || true)
+    [ -n "$out" ] && all="$all $out"
+  done
+  printf '%s\n' $all | grep -E '^[0-9]+$' | sort -n -u | tr '\n' ' '
 }
 
 # ---------------------------------------------------------------------------
@@ -112,13 +127,40 @@ if online; then
   exit 0
 fi
 
-IP=$(detect_ip || true)
+# รวมทุก IP ของเครื่อง (Tailscale ก่อน แล้ว Wi-Fi แล้ว loopback)
+collect_hosts() {
+  local list=""
+  if [ -f "$FINDER" ]; then
+    list=$(timeout 15 python "$FINDER" --hosts 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true)
+  fi
+  if [ -z "$list" ]; then
+    local f
+    f=$(detect_ip || true)
+    list=$(printf '%s\n127.0.0.1' "${f:-}")
+  fi
+  printf '%s' "$list" | awk '!seen[$0]++' | tr '\n' ' '
+}
+
+HOST_LIST=$(collect_hosts)
+IP="${HOST_ARG:-$(printf '%s\n' $HOST_LIST | head -1)}"
+
 if [ -z "$IP" ]; then
-  printf "  หา IP อัตโนมัติไม่ได้ — พิมพ์ IP (เช่น 192.168.1.156): "
+  printf "  หา IP อัตโนมัติไม่ได้ — พิมพ์ IP (เช่น 100.94.117.13): "
   read -r IP || true
+  HOST_LIST="$IP 127.0.0.1"
 fi
 [ -z "$IP" ] && { bad "ไม่รู้ IP"; exit 1; }
-ok "IP: ${BOLD}${IP}${OFF}"
+
+ok "IP ที่จะใช้: ${BOLD}${IP}${OFF}"
+q "จะลองทั้งหมด: $(printf '%s' "$HOST_LIST" | tr -s ' ')"
+TS_IP=$(printf '%s\n' $HOST_LIST | while read -r h; do
+  python -c "
+import sys
+p=sys.argv[1].split('.')
+sys.exit(0 if len(p)==4 and p[0]=='100' and 64<=int(p[1])<=127 else 1)
+" "$h" 2>/dev/null && { echo "$h"; break; }
+done)
+[ -n "${TS_IP:-}" ] && ok "พบ Tailscale: ${BOLD}${TS_IP}${OFF} (จะลองตัวนี้ก่อน)"
 
 cat <<EOF
 
@@ -169,8 +211,9 @@ while [ "$ATTEMPT" -le "$MAX" ]; do
 
   PAIRED=0
   for p in $CANDS; do
-    printf "  adb pair %s:%s ... " "$IP" "$p"
-    OUT=$(timeout 30 adb pair "${IP}:${p}" "$CODE" 2>&1 || true)
+    for h in $HOST_LIST; do
+    printf "  adb pair %s:%s ... " "$h" "$p"
+    OUT=$(timeout 30 adb pair "${h}:${p}" "$CODE" 2>&1 || true)
     case "$OUT" in
       *Successfully\ paired*|*"protocol fault"*Success*)
         printf "${GREEN}✓${OFF}\n"; PAIRED=1; PAIR_PORT="$p"; break ;;
@@ -179,6 +222,9 @@ while [ "$ATTEMPT" -le "$MAX" ]; do
       *)
         printf "${DIM}%s${OFF}\n" "$(printf '%s' "$OUT" | head -1)" ;;
     esac
+    [ "$PAIRED" = 1 ] && break
+    done
+    [ "$PAIRED" = 1 ] && break
   done
 
   if [ "$PAIRED" = 1 ]; then
@@ -227,7 +273,7 @@ adb start-server >/dev/null 2>&1 || true
 # เก็บพอร์ตที่ "เปิดจริง" เท่านั้น — mDNS มักประกาศพอร์ตเก่าค้างไว้
 probe_open() {  # $1 = port ; คืน 0 ถ้ามีใครฟังอยู่
   local h
-  for h in "$IP" 127.0.0.1; do
+  for h in $HOST_LIST; do
     if command -v timeout >/dev/null 2>&1; then
       timeout 2 bash -c "exec 3<>/dev/tcp/$h/$1" 2>/dev/null && return 0
     else
@@ -271,8 +317,7 @@ fi
 [ -z "${LIVE_PORTS// /}" ] && { bad "ไม่ได้พอร์ต connect"; exit 1; }
 q "พอร์ตที่จะลอง:$(printf '%s' "$LIVE_PORTS" | tr -s ' ')"
 
-HOSTS="$IP 127.0.0.1"
-[ "$IP" = "127.0.0.1" ] && HOSTS="127.0.0.1"
+HOSTS="$HOST_LIST"
 
 CONNECTED=0
 for p in $LIVE_PORTS; do
