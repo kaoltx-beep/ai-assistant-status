@@ -31,6 +31,7 @@ bash pair-now.sh             # ทางเลือกที่ชัวร์�
 bash go.sh --host=100.x.y.z  # ระบุ IP เอง (เช่น IP ของ Tailscale)
 bash last-mile.sh            # ถ้าค้างที่ 'offline' — ดึงให้เป็น 'device'
 python find_port.py --connect # หา + ต่อให้เลย (mDNS ไม่ได้ผลจะสแกนเอง แล้วตัด transport ผีทิ้ง)
+bash watch-connect.sh        # เฝ้าพอร์ตเองแล้วต่อทันที (แก้พอร์ตหมุน/พิมพ์ไม่ทัน)
 bash fix-adb.sh              # หา IP/พอร์ต + ทดสอบว่าติดตรงไหน
 bash setup-adb.sh            # pair + connect รวดเดียว
 bash find_port.sh            # หา IP:พอร์ต ADB เองแล้วเชื่อมให้ (mDNS → /proc → สแกน)
