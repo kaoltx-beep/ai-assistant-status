@@ -425,22 +425,32 @@ def scan_candidates(exclude: set[int], limit: int = 40) -> list[tuple[str, int]]
     Probing only says "somebody listens here"; try_connect() decides whether it
     is really adbd. Loopback goes first because it answers instantly.
     """
+    hosts = local_ips(include_loopback=False)
+    loopback = [ip for ip in local_ips(include_loopback=True) if ip.startswith("127.")]
+
     found: list[tuple[str, int]] = []
-    for ip in local_ips(include_loopback=True):
+    for ip in hosts:
         print(f"  สแกน {ip} ...", flush=True)
         try:
             ports = scan_open_ports(ip, 30000, 50000)
         except (OSError, subprocess.SubprocessError):
             continue
-        for port in ports:
-            if port in exclude:
-                continue
-            found.append((ip, port))
-            if len(found) >= limit:
-                return found
+        found.extend((ip, port) for port in ports if port not in exclude)
         if found:
-            return found
-    return found
+            return found[:limit]
+
+    # Loopback only when no real interface answered: every app on the phone has
+    # a socket here, so it is the slowest and noisiest place to look.
+    for ip in loopback:
+        print(f"  สแกน {ip} ...", flush=True)
+        try:
+            ports = scan_open_ports(ip, 30000, 50000)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        found.extend((ip, port) for port in ports if port not in exclude)
+        if found:
+            break
+    return found[:limit]
 
 
 def fmt_pairs(pairs: list[tuple[str, int]]) -> str:

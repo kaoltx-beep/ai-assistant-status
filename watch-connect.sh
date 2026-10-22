@@ -48,11 +48,31 @@ HOSTS=$(printf '%s\n' $HOSTS | awk '!seen[$0]++')
 say "เริ่มเฝ้าพอร์ต"
 q "IP ที่จะสแกน: $(printf '%s ' $HOSTS)"
 q "ช่วงพอร์ต: ${START}-${END}  (วนสูงสุด ${ROUNDS} รอบ)"
+HAS_TS=""
+for h in $HOSTS; do
+  case "$h" in
+    100.64.*|100.65.*|100.66.*|100.67.*|100.68.*|100.69.*|100.7[0-9].*|100.8[0-9].*|100.9[0-9].*|100.1[0-2][0-9].*) HAS_TS=1 ;;
+  esac
+done
+
+if [ -z "$HAS_TS" ]; then
+  printf "\n  ${YELLOW}ไม่พบ Tailscale${OFF}\n"
+  q "ถ้าเล่นเน็ตผ่าน 4G/5G ต้องเปิดแอป Tailscale (Connected) ก่อน ไม่งั้น adbd จะไม่เปิดพอร์ตให้"
+  q "ถ้ามี Wi-Fi ก็ต่อ Wi-Fi ได้เลย"
+fi
+
 printf "\n  ${BOLD}${YELLOW}ทำบนมือถือตอนนี้:${OFF}\n"
-printf "    1. เปิด Wi-Fi (ต้องต่อ Wi-Fi ไม่ใช่แค่ 4G/5G)\n"
+printf "    1. เน็ตต้องใช้ได้ (Wi-Fi หรือ 4G/5G + Tailscale ที่ Connected)\n"
 printf "    2. ไปที่ Developer options → ${BOLD}Wireless debugging${OFF}\n"
 printf "    3. ${BOLD}ปิดสวิตช์ แล้วเปิดใหม่${OFF} (หรือล็อกจอ-ปลดล็อก)\n"
 printf "    4. กลับมาดูจอนี้ — ไม่ต้องพิมพ์อะไรอีก\n\n"
+
+scan_host() {  # $1 = ip ; พิมพ์พอร์ตที่เปิด (บรรทัดละตัว)
+  timeout 60 python "$FINDER" --scan-pair --ip "$1" \
+    --port-start "$START" --port-end "$END" 2>/dev/null \
+    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$' \
+    | awk -F: '{print $NF}' | sort -n -u || true
+}
 
 SEEN=""
 ROUND=0
@@ -60,19 +80,27 @@ while [ "$ROUND" -lt "$ROUNDS" ]; do
   ROUND=$((ROUND + 1))
   printf "\r  ${DIM}รอบ %d/%d — สแกนอยู่ ...${OFF}   " "$ROUND" "$ROUNDS"
 
+  # สแกน interface จริงก่อน (Tailscale มาก่อน) แล้วค่อย loopback
+  # เหตุผล: 127.0.0.1 มี socket ของแอปอื่นเต็มไปหมด ซึ่งทำให้สแกนช้าและได้พอร์ตผี
+  CANDS=""
   for ip in $HOSTS; do
-    PORTS=$(timeout 60 python "$FINDER" --scan-pair --ip "$ip" \
-              --port-start "$START" --port-end "$END" 2>/dev/null \
-            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$' \
-            | awk -F: '{print $NF}' | sort -n -u || true)
-    [ -n "$PORTS" ] || continue
+    case "$ip" in 127.*) continue ;; esac
+    PORTS=$(scan_host "$ip")
+    for p in $PORTS; do CANDS="$CANDS $ip:$p"; done
+  done
+  if [ -z "$CANDS" ]; then
+    for p in $(scan_host 127.0.0.1); do CANDS="$CANDS 127.0.0.1:$p"; done
+  fi
 
-    for p in $PORTS; do
-      TARGET="$ip:$p"
+  if [ -n "$CANDS" ]; then
+    printf "\r%-70s\r" " "
+    printf "  รอบ %d: พบ %d พอร์ต — กำลังทดสอบ\n" "$ROUND" "$(printf '%s\n' $CANDS | wc -l)"
+  fi
+
+  for TARGET in $CANDS; do
       case " $SEEN " in *" $TARGET "*) continue ;; esac
       SEEN="$SEEN $TARGET"
-
-      printf "\r%-60s\r" " "
+      printf "\r%-70s\r" " "
       printf "  พบพอร์ตใหม่ %s ... " "$TARGET"
       OUT=$(timeout 20 adb connect "$TARGET" 2>&1 || true)
       printf "${DIM}%s${OFF}\n" "$(printf '%s' "$OUT" | head -1)"
@@ -99,7 +127,6 @@ while [ "$ROUND" -lt "$ROUNDS" ]; do
         *)            printf "    ${DIM}สถานะ '%s' — ตัดทิ้ง${OFF}\n" "$ST" ;;
       esac
       adb disconnect "$TARGET" >/dev/null 2>&1 || true
-    done
   done
 done
 
